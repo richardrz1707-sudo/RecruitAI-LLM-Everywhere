@@ -694,6 +694,23 @@ export default function DashboardPage() {
     return Object.fromEntries(Object.entries(weights).map(([k, v]) => [k, v / total]))
   }, [weights])
 
+  const appliedCandidates = useMemo(() => (
+    applications
+      .map((app) => {
+        const cand = app.candidates || {}
+        if (!cand.id) return null
+        return {
+          ...cand,
+          resume_text: app.resume_text || cand.resume_text || '',
+          resume_filename: app.resume_filename || cand.resume_filename || '',
+          application_id: app.id,
+          application_status: app.status,
+          match_score: app.match_score,
+        }
+      })
+      .filter(Boolean)
+  ), [applications])
+
   // ── Load JD list + candidates on mount ───────────────────────────────
   useEffect(() => {
     loadJdList()
@@ -711,6 +728,7 @@ export default function DashboardPage() {
       setSelectedSession(null)
       setSessionDetail(null)
       setApplications([])
+      setSelectedIds(new Set())
       return
     }
     setIsEditing(false)
@@ -719,6 +737,7 @@ export default function DashboardPage() {
     setMatchError('')
     setSelectedSession(null)
     setSessionDetail(null)
+    setSelectedIds(new Set())
 
     getScreeningLink(selectedJdId)
       .then((r) => {
@@ -843,8 +862,8 @@ export default function DashboardPage() {
     })
   }
   const toggleSelectAll = () => {
-    if (selectedIds.size === candidates.length) setSelectedIds(new Set())
-    else setSelectedIds(new Set(candidates.map((c) => c.id)))
+    if (selectedIds.size === appliedCandidates.length) setSelectedIds(new Set())
+    else setSelectedIds(new Set(appliedCandidates.map((c) => c.id)))
   }
   const handleWeightChange = (key, value) => setWeights((prev) => ({ ...prev, [key]: Number(value) }))
   const handleRunMatching = async () => {
@@ -1524,19 +1543,19 @@ export default function DashboardPage() {
                     + Add Candidate
                   </button>
                 </div>
-                {candidates.length === 0 ? (
-                  <p className="text-sm text-gray-500">No candidates yet. Upload resumes from the Candidate Dashboard.</p>
+                {appliedCandidates.length === 0 ? (
+                  <p className="text-sm text-gray-500">No applications for this job yet. Candidates will appear here after they apply.</p>
                 ) : (
                   <>
                     <div className="flex items-center justify-between">
                       <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-700 select-none">
-                        <input type="checkbox" checked={selectedIds.size === candidates.length} onChange={toggleSelectAll} className="w-4 h-4 accent-teal-600" />
-                        Select All ({candidates.length})
+                        <input type="checkbox" checked={selectedIds.size === appliedCandidates.length} onChange={toggleSelectAll} className="w-4 h-4 accent-teal-600" />
+                        Select All ({appliedCandidates.length})
                       </label>
                       <span className="text-xs text-gray-400">{selectedIds.size} selected</span>
                     </div>
                     <div className="divide-y divide-gray-100 border border-gray-200 rounded-lg max-h-40 overflow-y-auto">
-                      {candidates.map((c) => (
+                      {appliedCandidates.map((c) => (
                         <label key={c.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
                           <input type="checkbox" checked={selectedIds.has(c.id)} onChange={() => toggleCandidate(c.id)} className="w-4 h-4 accent-teal-600 flex-shrink-0" />
                           <div className="flex-1 min-w-0">
@@ -1717,7 +1736,7 @@ export default function DashboardPage() {
                 </h2>
                 <div className="space-y-4">
                   {matchResults.map((candidate, index) => {
-                    const fullCand = candidates.find((c) => c.id === candidate.candidate_id)
+                    const fullCand = appliedCandidates.find((c) => c.id === candidate.candidate_id)
                     return (
                       <CandidateScoreCard
                         key={candidate.candidate_id}
