@@ -101,17 +101,30 @@ export const getAnalysisHistory = (candidateId) =>
 
 // ── Phase 4: AI Screening ─────────────────────────────────────────────────
 
-export const createScreeningLink = (jdId, interviewMode = 'text_only') =>
-  api.post('/screening/create-link', { jd_id: jdId, interview_mode: interviewMode })
+export const createScreeningLink = (jdId) =>
+  api.post('/screening/create-link', { jd_id: jdId })
 
 export const getScreeningLink = (jdId) =>
   api.get(`/screening/link/${jdId}`)
+
+/** Candidate history by email — no auth required, survives logout */
+export const getSessionsByEmail = (email) =>
+  api.get(`/screening/sessions/by-email/${encodeURIComponent(email)}`)
 
 export const getScreeningResults = (jdId) =>
   api.get(`/screening/results/${jdId}`)
 
 export const getScreeningSessionDetail = (sessionId) =>
   api.get(`/screening/session-detail/${sessionId}`)
+
+export const getSessionFeedback = (sessionId) =>
+  api.get(`/feedback/session/${sessionId}`)
+
+export const getMyFeedbackHistory = () =>
+  api.get('/feedback/my-history')
+
+export const getFeedbackHistoryByEmail = (email) =>
+  api.get(`/feedback/history/by-email/${encodeURIComponent(email)}`)
 
 export const startScreening = (token) =>
   api.get(`/screening/start/${token}`)
@@ -142,5 +155,74 @@ export const saveSessionDecision = (sessionId, decision, reason = '') =>
     decision,
     reason,
   })
+
+// ── Invites ───────────────────────────────────────────────────────────────
+
+export const createInvite = (candidateId, jdId) =>
+  api.post('/invites/create', { candidate_id: candidateId, jd_id: jdId })
+
+export const getInvitesForJd = (jdId) =>
+  api.get(`/invites/for-jd/${jdId}`)
+
+export const expireInvite = (inviteId) =>
+  api.patch(`/invites/expire/${inviteId}`)
+
+// ── Applications ──────────────────────────────────────────────────────────
+
+export const getApplicationsForJd = (jdId) =>
+  api.get(`/applications/for-jd/${jdId}`)
+
+export const updateApplicationStatus = (applicationId, status) =>
+  api.patch('/applications/status', { application_id: applicationId, status })
+
+// ── Recruiter candidate pool ──────────────────────────────────────────────
+
+export const getRecruiterCandidatePool = () =>
+  api.get('/hiring-manager/candidates/pool')
+
+export const getCandidateResume = (candidateId) =>
+  api.get(`/hiring-manager/candidates/${candidateId}/resume`)
+
+export const addCandidateManually = (formData) =>
+  api.post('/hiring-manager/candidates/add', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+
+// ── Candidate self-service (Prompt C) ────────────────────────────────────
+
+export const getCandidateProfile = () =>
+  api.get('/candidates/profile')
+
+export const uploadMyResume = (formData) =>
+  api.post('/candidates/profile/resume', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+
+/** Parse a resume file without saving it to profile — returns { resume_text, filename } */
+export const parseResumeOnly = (formData) =>
+  api.post('/candidates/parse-resume', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+
+/** Candidate's resume upload history */
+export const getResumeUploadHistory = () =>
+  api.get('/candidates/upload-history')
+
+export const getJdPool = () =>
+  api.get('/candidates/jd-pool')
+
+export const applyToJd = (jdId, coverNote = '', resumeText = '') =>
+  api.post('/candidates/apply', { jd_id: jdId, cover_note: coverNote, resume_text: resumeText })
+
+export const getMyApplications = () =>
+  api.get('/candidates/my-applications')
+
+export const getMyInvites = () =>
+  api.get('/candidates/my-invites')
+
+// ── JD visibility ─────────────────────────────────────────────────────────
+
+export const updateJdVisibility = (jdId, visibility) =>
+  api.patch('/hiring-manager/jd/visibility', { jd_id: jdId, visibility })
 
 export default api
