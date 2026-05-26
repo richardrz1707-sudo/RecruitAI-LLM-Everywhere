@@ -1,8 +1,8 @@
 import uuid
 import secrets
+from urllib.parse import urlparse
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
-from supabase import create_client
-from app.database import supabase, get_authed_client, get_current_user_id, get_svc_client
+from app.database import supabase, get_authed_client, get_current_user_id, get_svc_client, create_supabase_client
 from app.config import settings
 from app.services.resume_parser import parse_resume
 from app.services.matching import (
@@ -12,9 +12,36 @@ from app.services.matching import (
     calculate_weighted_score,
 )
 from app.services.utils import truncate_resume, get_cached_match_score
-from app.models.schemas import CreateApplicationRequest
+from app.models.schemas import CandidateProfileUpdate, CreateApplicationRequest
 
 router = APIRouter()
+
+
+def _is_real_ai_match(score_json: dict | None, total_score: float | int | None = None) -> bool:
+    if not score_json or (total_score or 0) <= 0:
+        return False
+    summary = score_json.get("overall_summary", "")
+    return (
+        "Unable to score" not in summary
+        and "Scoring unavailable" not in summary
+        and "Estimated match score" not in summary
+        and bool(score_json.get("why_this_person"))
+    )
+
+
+def _normalise_linkedin_url(value: str | None) -> str:
+    url = (value or "").strip()
+    if not url:
+        return ""
+    if "://" not in url:
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    if parsed.scheme not in ("http", "https") or not host:
+        raise HTTPException(status_code=400, detail="Please enter a valid LinkedIn profile URL")
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        raise HTTPException(status_code=400, detail="Please enter a LinkedIn profile URL")
+    return url
 
 
 # ── Existing public/admin endpoints ──────────────────────────────────────────
@@ -79,7 +106,7 @@ async def get_public_jd_list():
     from when running resume analysis. No auth required.
     """
     svc_key = settings.SUPABASE_SERVICE_KEY or settings.SUPABASE_ANON_KEY
-    client = create_client(settings.SUPABASE_URL, svc_key)
+    client = create_supabase_client(settings.SUPABASE_URL, svc_key)
     response = (
         client.table("jd_posts")
         .select("id, title, department, location")
@@ -115,6 +142,63 @@ async def get_my_profile(
         "profile": profile.data,
         "candidate": candidate.data[0] if candidate.data else None,
     }
+
+
+@router.patch("/profile")
+async def update_my_profile(
+    update: CandidateProfileUpdate,
+    profile_id: str = Depends(get_current_user_id),
+):
+    """Candidate updates optional profile details stored on their candidate record."""
+    profile = (
+        supabase.table("profiles")
+        .select("email, full_name")
+        .eq("id", profile_id)
+        .single()
+        .execute()
+    )
+    if not profile.data:
+        raise HTTPException(status_code=400, detail="Profile not found")
+
+    changes = {}
+    if update.headline is not None:
+        changes["headline"] = update.headline.strip()
+    if update.location is not None:
+        changes["location"] = update.location.strip()
+    if update.linkedin_url is not None:
+        changes["linkedin_url"] = _normalise_linkedin_url(update.linkedin_url)
+
+    if not changes:
+        return {"candidate": None}
+
+    existing = (
+        supabase.table("candidates")
+        .select("id")
+        .eq("profile_id", profile_id)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        result = (
+            supabase.table("candidates")
+            .update(changes)
+            .eq("id", existing.data[0]["id"])
+            .execute()
+        )
+    else:
+        result = (
+            supabase.table("candidates")
+            .insert({
+                "profile_id": profile_id,
+                "name": profile.data.get("full_name", ""),
+                "email": profile.data.get("email", ""),
+                **changes,
+            })
+            .execute()
+        )
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to update candidate profile")
+    return {"candidate": result.data[0]}
 
 
 @router.post("/profile/resume")
@@ -242,7 +326,7 @@ async def apply_to_jd(
     # Resolve candidate record
     candidate_row = (
         supabase.table("candidates")
-        .select("id, name, resume_text, resume_url")
+        .select("id, name, resume_text, resume_url, linkedin_url")
         .eq("profile_id", profile_id)
         .limit(1)
         .execute()
@@ -268,11 +352,15 @@ async def apply_to_jd(
         .execute()
     )
     existing_app = existing.data[0] if existing.data else None
-    if existing_app and (existing_app.get("match_score") or 0) > 0:
+
+    cached = get_cached_match_score(candidate_id, request.jd_id)
+    cached_score = cached.get("total_score", 0) if cached else 0
+    cached_json = cached.get("score_json", {}) if cached else {}
+    if existing_app and _is_real_ai_match(cached_json, cached_score):
         return {
             "application_id": existing_app["id"],
             "status": existing_app["status"],
-            "match_score": existing_app["match_score"],
+            "match_score": cached_score,
             "message": "Already applied",
         }
 
@@ -286,12 +374,7 @@ async def apply_to_jd(
     match_score = 0.0
     match_json: dict = {}
 
-    cached = get_cached_match_score(candidate_id, request.jd_id)
-    cached_score = cached.get("total_score", 0) if cached else 0
-    cached_json = cached.get("score_json", {}) if cached else {}
-    if cached and cached_score > 0 and "Unable to score" not in (
-        cached_json.get("overall_summary", "")
-    ):
+    if _is_real_ai_match(cached_json, cached_score):
         match_score = cached.get("total_score", 0.0)
         match_json = cached.get("score_json", {})
     else:
@@ -337,9 +420,7 @@ async def apply_to_jd(
             .execute()
         )
         # Only cache a real score — never persist a failed/default result
-        if match_score > 0 and "Unable to score" not in (
-            match_json.get("overall_summary", "")
-        ):
+        if _is_real_ai_match(match_json, match_score):
             if existing_score.data:
                 supabase.table("match_scores").update({
                     "score_json": match_json,

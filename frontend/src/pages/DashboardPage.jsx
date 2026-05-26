@@ -109,7 +109,7 @@ function MiniScoreBar({ label, score }) {
 
 function ResumeViewerModal({ data, onClose }) {
   if (!data) return null
-  const { name, email, resume_text, resume_url } = data
+  const { name, email, resume_text, resume_url, linkedin_url } = data
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
@@ -120,6 +120,16 @@ function ResumeViewerModal({ data, onClose }) {
           <div>
             <h2 className="text-base font-bold text-gray-900">📄 {name}</h2>
             <p className="text-xs text-gray-400 mt-0.5">{email}</p>
+            {linkedin_url && (
+              <a
+                href={linkedin_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-teal-600 hover:text-teal-800 underline"
+              >
+                LinkedIn profile
+              </a>
+            )}
           </div>
           <div className="flex items-center gap-2 ml-4">
             {resume_url && (
@@ -661,9 +671,9 @@ export default function DashboardPage() {
   const [loadingReview, setLoadingReview] = useState(false)
 
   // Resume viewer modal
-  const [resumeModal, setResumeModal] = useState(null) // null | { name, email, resume_text, resume_url }
-  const openResume = (name, email, resume_text, resume_url = '') =>
-    setResumeModal({ name, email, resume_text: resume_text || '', resume_url: resume_url || '' })
+  const [resumeModal, setResumeModal] = useState(null) // null | { name, email, resume_text, resume_url, linkedin_url }
+  const openResume = (name, email, resume_text, resume_url = '', linkedin_url = '') =>
+    setResumeModal({ name, email, resume_text: resume_text || '', resume_url: resume_url || '', linkedin_url: linkedin_url || '' })
 
   // Applications (self-applicants per JD)
   const [applications, setApplications]           = useState([])
@@ -706,6 +716,7 @@ export default function DashboardPage() {
           application_id: app.id,
           application_status: app.status,
           match_score: app.match_score,
+          linkedin_url: cand.linkedin_url || '',
         }
       })
       .filter(Boolean)
@@ -1205,6 +1216,12 @@ export default function DashboardPage() {
                 <h2 className="text-base font-bold text-gray-900">📄 {resumePanel?.name || '…'}</h2>
                 <p className="text-xs text-gray-400 mt-0.5">{resumePanel?.email}</p>
                 {resumePanel?.headline && <p className="text-xs text-gray-500 mt-0.5">{resumePanel.headline}</p>}
+                {resumePanel?.linkedin_url && (
+                  <a href={resumePanel.linkedin_url} target="_blank" rel="noopener noreferrer"
+                    className="text-xs text-teal-600 hover:text-teal-800 underline">
+                    LinkedIn profile
+                  </a>
+                )}
               </div>
               <div className="flex items-center gap-2 ml-4">
                 {resumePanel?.resume_url && (
@@ -1307,7 +1324,10 @@ export default function DashboardPage() {
       <aside className="w-[268px] flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
         {/* Sidebar header */}
         <div className="flex-shrink-0 px-4 py-3.5 border-b border-gray-100 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-gray-800 truncate">My Job Descriptions</h2>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Recruiter Dashboard</p>
+            <h2 className="text-sm font-semibold text-gray-800 truncate">My Job Descriptions</h2>
+          </div>
           <button
             onClick={() => setShowNewJdModal(true)}
             className="flex-shrink-0 bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap"
@@ -1565,7 +1585,7 @@ export default function DashboardPage() {
                           {(c.resume_text || c.resume_url) && (
                             <button
                               type="button"
-                              onClick={(e) => { e.preventDefault(); openResume(c.name, c.email, c.resume_text, c.resume_url) }}
+                              onClick={(e) => { e.preventDefault(); openResume(c.name, c.email, c.resume_text, c.resume_url, c.linkedin_url) }}
                               className="flex-shrink-0 text-gray-400 hover:text-teal-600 transition-colors text-base"
                               title="View Resume"
                             >
@@ -1662,6 +1682,16 @@ export default function DashboardPage() {
                               {cand.headline && (
                                 <p className="text-xs text-gray-400 truncate max-w-[180px]">{cand.headline}</p>
                               )}
+                              {cand.linkedin_url && (
+                                <a
+                                  href={cand.linkedin_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-xs text-teal-600 hover:text-teal-800 underline"
+                                >
+                                  LinkedIn profile
+                                </a>
+                              )}
                             </td>
                             <td className="py-3 pr-3">
                               <select
@@ -1698,7 +1728,7 @@ export default function DashboardPage() {
                                   <button
                                     onClick={() => {
                                       if (applicationResumeText) {
-                                        openResume(cand.name || applicationResumeName, cand.email || '', applicationResumeText)
+                                        openResume(cand.name || applicationResumeName, cand.email || '', applicationResumeText, '', cand.linkedin_url)
                                       } else {
                                         handleViewResume(cand.id)
                                       }
@@ -1743,7 +1773,7 @@ export default function DashboardPage() {
                         candidate={candidate}
                         rank={index + 1}
                         onViewResume={fullCand && (fullCand.resume_text || fullCand.resume_url)
-                          ? () => openResume(fullCand.name, fullCand.email, fullCand.resume_text, fullCand.resume_url)
+                          ? () => openResume(fullCand.name, fullCand.email, fullCand.resume_text, fullCand.resume_url, fullCand.linkedin_url)
                           : null}
                         onInvite={() => handleInvite(candidate.candidate_id, selectedJdId)}
                         isInvited={invitedCandidateIds.has(candidate.candidate_id)}

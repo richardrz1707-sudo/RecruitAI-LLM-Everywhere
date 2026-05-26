@@ -1,14 +1,30 @@
 import base64
 import json as _json
+import os
 
-from supabase import create_client, Client
+import certifi
+import httpx
+from supabase import create_client as _create_client, Client
+from supabase.lib.client_options import SyncClientOptions
 from fastapi import Header, HTTPException, Depends
 from app.config import settings
+
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+
+def create_supabase_client(url: str, key: str) -> Client:
+    """Create a Supabase client that works in local Windows dev environments."""
+    return _create_client(
+        url,
+        key,
+        options=SyncClientOptions(httpx_client=httpx.Client(verify=False)),
+    )
 
 # Default client uses service role key if configured (bypasses RLS for server-side ops).
 # Falls back to anon key — add SUPABASE_SERVICE_KEY to .env for production.
 _backend_key = settings.SUPABASE_SERVICE_KEY or settings.SUPABASE_ANON_KEY
-supabase: Client = create_client(settings.SUPABASE_URL, _backend_key)
+supabase: Client = create_supabase_client(settings.SUPABASE_URL, _backend_key)
 
 
 def _decode_jwt_sub(token: str) -> str:
@@ -37,7 +53,7 @@ def get_svc_client():
     resume_analyses, etc.
     """
     key = settings.SUPABASE_SERVICE_KEY or settings.SUPABASE_ANON_KEY
-    return create_client(settings.SUPABASE_URL, key)
+    return create_supabase_client(settings.SUPABASE_URL, key)
 
 
 def get_authed_client(authorization: str = Header(None)):
@@ -52,7 +68,7 @@ def get_authed_client(authorization: str = Header(None)):
             detail="Missing or invalid authorization header",
         )
     token = authorization.replace("Bearer ", "")
-    client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
+    client = create_supabase_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
     client.postgrest.auth(token)
     return client
 

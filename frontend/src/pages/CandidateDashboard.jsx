@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  getCandidateProfile, uploadMyResume, getJdPool, applyToJd,
+  getCandidateProfile, updateCandidateProfile, uploadMyResume, getJdPool, applyToJd,
   getMyApplications, getMyInvites, refreshMyInviteToken, parseResumeOnly, getResumeUploadHistory,
   getPublicJDList, analyseResume, getAnalysisHistory, getSessionsByEmail,
   getMyFeedbackHistory, getFeedbackHistoryByEmail,
@@ -75,6 +75,8 @@ export default function CandidateDashboard() {
   const [resumeFile, setResumeFile]     = useState(null)
   const [uploadingResume, setUploadingResume] = useState(false)
   const [resumeUploads, setResumeUploads] = useState([])
+  const [linkedinUrl, setLinkedinUrl] = useState('')
+  const [savingLinkedin, setSavingLinkedin] = useState(false)
 
   // Per-application resume (apply modal)
   const [applyResumeFile, setApplyResumeFile] = useState(null)
@@ -155,6 +157,7 @@ export default function CandidateDashboard() {
     try {
       const r = await getCandidateProfile()
       setProfile(r.data)
+      setLinkedinUrl(r.data?.candidate?.linkedin_url || '')
       if (r.data?.candidate?.id) {
         getAnalysisHistory(r.data.candidate.id)
           .then((h) => setHistory(h.data?.data?.history || []))
@@ -271,6 +274,24 @@ export default function CandidateDashboard() {
       toast.error(err.response?.data?.detail || 'Upload failed')
     } finally {
       setUploadingResume(false)
+    }
+  }
+
+  const handleSaveLinkedin = async (e) => {
+    e.preventDefault()
+    setSavingLinkedin(true)
+    try {
+      const r = await updateCandidateProfile({ linkedin_url: linkedinUrl })
+      setProfile((prev) => ({
+        ...prev,
+        candidate: r.data?.candidate || prev?.candidate,
+      }))
+      setLinkedinUrl(r.data?.candidate?.linkedin_url || '')
+      toast.success('LinkedIn profile saved')
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to save LinkedIn profile')
+    } finally {
+      setSavingLinkedin(false)
     }
   }
 
@@ -517,7 +538,7 @@ export default function CandidateDashboard() {
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
       <aside className="w-64 shrink-0 bg-white border-r border-gray-200 flex flex-col py-6 px-3">
         <div className="mb-6 px-3">
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Candidate Portal</p>
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Candidate Dashboard</p>
           {loadingProfile ? (
             <p className="text-xs text-gray-400">Loading…</p>
           ) : candidate ? (
@@ -860,6 +881,37 @@ export default function CandidateDashboard() {
                       </p>
                     </div>
                   </div>
+                  <form onSubmit={handleSaveLinkedin} className="pt-2 border-t border-gray-100 space-y-2">
+                    <label className="block text-sm font-medium text-gray-700">
+                      LinkedIn profile URL <span className="text-gray-400 font-normal">(optional)</span>
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={linkedinUrl}
+                        onChange={(e) => setLinkedinUrl(e.target.value)}
+                        placeholder="https://www.linkedin.com/in/your-profile"
+                        className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      />
+                      <button
+                        type="submit"
+                        disabled={savingLinkedin}
+                        className="bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm transition-colors"
+                      >
+                        {savingLinkedin ? 'Saving...' : 'Save'}
+                      </button>
+                    </div>
+                    {candidate?.linkedin_url && (
+                      <a
+                        href={candidate.linkedin_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block text-xs text-teal-600 hover:text-teal-800 underline"
+                      >
+                        View LinkedIn profile
+                      </a>
+                    )}
+                  </form>
                 </div>
 
                 {/* Resume section */}

@@ -36,3 +36,7 @@ app.include_router(screening_router, prefix="/api/v1", tags=["screening"])
 app.include_router(invites_router, prefix="/api/v1", tags=["invites"])
 app.include_router(applications_router, prefix="/api/v1", tags=["applications"])
 app.include_router(feedback_router, prefix="/api/v1", tags=["feedback"])
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

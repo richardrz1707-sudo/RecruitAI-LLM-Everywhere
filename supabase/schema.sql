@@ -17,6 +17,7 @@ create table candidates (
   id uuid default gen_random_uuid() primary key,
   name text not null,
   email text,
+  linkedin_url text,
   resume_url text,
   resume_text text,
   created_at timestamp with time zone default now()

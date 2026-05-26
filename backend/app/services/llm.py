@@ -1,7 +1,12 @@
 import anthropic
+import httpx
 from app.config import settings
 
-_client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+_http_client = httpx.AsyncClient(verify=False)
+_client = anthropic.AsyncAnthropic(
+    api_key=settings.ANTHROPIC_API_KEY,
+    http_client=_http_client,
+)
 
 
 async def call_claude(

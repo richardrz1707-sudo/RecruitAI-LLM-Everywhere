@@ -28,7 +28,7 @@ async def get_applications_for_jd(
 
     result = (
         supabase.table("jd_applications")
-        .select("*, candidates(id, name, email, resume_url, headline, location)")
+        .select("*, candidates(id, name, email, resume_url, headline, location, linkedin_url)")
         .eq("jd_id", jd_id)
         .order("match_score", desc=True)
         .execute()

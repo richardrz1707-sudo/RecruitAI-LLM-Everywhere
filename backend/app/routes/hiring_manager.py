@@ -336,7 +336,7 @@ async def get_recruiter_candidate_pool(
         supabase.table("jd_applications")
         .select(
             "*, "
-            "candidates(id, name, email, headline, resume_url), "
+            "candidates(id, name, email, headline, resume_url, linkedin_url), "
             "jd_posts(title)"
         )
         .in_("jd_id", jd_ids)
@@ -354,7 +354,7 @@ async def get_candidate_resume(
     """Recruiter fetches candidate resume text and URL."""
     candidate = (
         supabase.table("candidates")
-        .select("name, email, resume_url, resume_text, headline, location")
+        .select("name, email, resume_url, resume_text, headline, location, linkedin_url")
         .eq("id", candidate_id)
         .single()
         .execute()

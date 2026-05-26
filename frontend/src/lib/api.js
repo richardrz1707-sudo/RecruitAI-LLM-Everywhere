@@ -201,6 +201,9 @@ export const addCandidateManually = (formData) =>
 export const getCandidateProfile = () =>
   api.get('/candidates/profile')
 
+export const updateCandidateProfile = (updates) =>
+  api.patch('/candidates/profile', updates)
+
 export const uploadMyResume = (formData) =>
   api.post('/candidates/profile/resume', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },

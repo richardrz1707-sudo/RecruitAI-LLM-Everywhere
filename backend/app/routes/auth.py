@@ -4,9 +4,8 @@ No Claude calls — zero AI credit cost.
 """
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from supabase import create_client
 from app.config import settings
-from app.database import supabase, get_svc_client, get_current_user_id
+from app.database import supabase, create_supabase_client, get_svc_client, get_current_user_id
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -31,7 +30,7 @@ async def signup(data: SignupRequest):
 
     email = data.email.lower().strip()
     try:
-        auth_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
+        auth_client = create_supabase_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
         result = auth_client.auth.sign_up({
             "email": email,
             "password": data.password,

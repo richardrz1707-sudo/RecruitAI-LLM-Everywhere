@@ -1,4 +1,7 @@
-from app.services.llm import call_claude
+import anthropic
+import httpx
+
+from app.config import settings
 from app.services.utils import (
     truncate_resume, truncate_jd,
     get_cached_resume_analysis, safe_json_parse,
@@ -55,6 +58,27 @@ JSON structure:
 }"""
 
 
+async def _call_resume_analysis_claude(
+    system_prompt: str,
+    messages: list,
+    max_tokens: int,
+    model: str,
+) -> str:
+    """Use a local client so resume analysis works on Windows dev cert setups."""
+    async with httpx.AsyncClient(verify=False) as http_client:
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.ANTHROPIC_API_KEY,
+            http_client=http_client,
+        )
+        response = await client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=messages,
+        )
+        return response.content[0].text
+
+
 async def analyse_resume(resume_text: str, jd_text: str, candidate_name: str) -> dict:
     user_message = (
         f"Candidate: {candidate_name}\n"
@@ -63,7 +87,7 @@ async def analyse_resume(resume_text: str, jd_text: str, candidate_name: str) ->
     )
     messages = [{"role": "user", "content": user_message}]
     try:
-        result = await call_claude(
+        result = await _call_resume_analysis_claude(
             _SYSTEM_PROMPT,
             messages,
             max_tokens=MAX_TOKENS["resume_analysis"],
@@ -73,7 +97,8 @@ async def analyse_resume(resume_text: str, jd_text: str, candidate_name: str) ->
         if not parsed or "scores" not in parsed:
             return _DEFAULT_RESULT.copy()
         return parsed
-    except Exception:
+    except Exception as exc:
+        print(f"[resume_analysis] Claude analysis failed: {exc}")
         return _DEFAULT_RESULT.copy()
 
 

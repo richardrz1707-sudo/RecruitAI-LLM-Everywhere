@@ -173,6 +173,7 @@ class UpdateJDVisibilityRequest(BaseModel):
 class CandidateProfileUpdate(BaseModel):
     headline: Optional[str] = None
     location: Optional[str] = None
+    linkedin_url: Optional[str] = None
 
 
 # ── JD Application ────────────────────────────────────────────────────────

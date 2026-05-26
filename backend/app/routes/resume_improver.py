@@ -6,12 +6,23 @@ from app.services.resume_analysis import analyse_resume, get_cached_analysis, sa
 router = APIRouter()
 
 
+def _is_failed_analysis(scorecard: dict | None) -> bool:
+    if not scorecard:
+        return True
+    summary = scorecard.get("overall_summary", "")
+    scores = scorecard.get("scores") or {}
+    return (
+        "Analysis failed" in summary
+        or (scores and all((value or 0) <= 0 for value in scores.values()))
+    )
+
+
 @router.post("/resume-improver/analyse")
 async def analyse(body: ResumeAnalyseRequest):
     # Cache check — skip Claude entirely if result already exists
     if not body.force_refresh:
         cached = get_cached_analysis(body.candidate_id, body.jd_id)
-        if cached:
+        if cached and not _is_failed_analysis(cached.get("scorecard_json")):
             return {
                 "candidate_id": body.candidate_id,
                 "jd_id": body.jd_id,
@@ -56,6 +67,11 @@ async def analyse(body: ResumeAnalyseRequest):
     jd_text = jd_res.data[0]["jd_text"]
 
     result = await analyse_resume(resume_text, jd_text, candidate["name"])
+    if _is_failed_analysis(result):
+        raise HTTPException(
+            status_code=502,
+            detail="Resume analysis is temporarily unavailable. Please try again.",
+        )
 
     saved = save_analysis(
         body.candidate_id,

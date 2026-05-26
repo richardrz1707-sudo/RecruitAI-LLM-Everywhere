@@ -48,14 +48,14 @@ export default function Navbar() {
                   to="/dashboard"
                   className="text-sm text-gray-600 hover:text-teal-600 font-medium transition-colors"
                 >
-                  Dashboard
+                  Recruiter Dashboard
                 </Link>
               ) : (
                 <Link
                   to="/candidate"
                   className="text-sm text-gray-600 hover:text-teal-600 font-medium transition-colors"
                 >
-                  My Dashboard
+                  Candidate Dashboard
                 </Link>
               )}
 
