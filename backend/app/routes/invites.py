@@ -6,6 +6,122 @@ from app.models.schemas import CreateInviteRequest
 router = APIRouter(prefix="/invites", tags=["invites"])
 
 
+def _question_payload(question: dict, index: int) -> dict:
+    return {
+        "id": question.get("id", index + 1),
+        "question": (question.get("question") or "").strip(),
+        "dimension": question.get("dimension") or "job_fit",
+        "probes_skill": question.get("probes_skill") or "role fit",
+        "strong_answer_hint": question.get("strong_answer_hint") or "",
+    }
+
+
+@router.post("/preview-questions")
+async def preview_invite_questions(
+    request: dict,
+    client=Depends(get_authed_client),
+    recruiter_id: str = Depends(get_current_user_id),
+):
+    candidate_id = request.get("candidate_id")
+    jd_id = request.get("jd_id")
+    if not candidate_id or not jd_id:
+        raise HTTPException(status_code=400, detail="candidate_id and jd_id are required")
+
+    owned_jd = (
+        client.table("jd_posts")
+        .select("id, title, jd_text")
+        .eq("id", jd_id)
+        .eq("recruiter_id", recruiter_id)
+        .limit(1)
+        .execute()
+    )
+    if not owned_jd.data:
+        raise HTTPException(status_code=404, detail="Job description not found or not owned by you")
+
+    candidate = (
+        supabase.table("candidates")
+        .select("id, name, email, resume_text")
+        .eq("id", candidate_id)
+        .limit(1)
+        .execute()
+    )
+    if not candidate.data:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    from app.services.screening_agent import get_or_create_questions
+
+    jd = owned_jd.data[0]
+    cand = candidate.data[0]
+    questions, from_cache = await get_or_create_questions(
+        jd_id=jd_id,
+        jd_text=jd.get("jd_text") or "",
+        candidate_id=candidate_id,
+        resume_text=cand.get("resume_text") or "",
+    )
+
+    return {
+        "candidate_id": candidate_id,
+        "candidate_name": cand.get("name") or "Candidate",
+        "jd_id": jd_id,
+        "jd_title": jd.get("title") or "",
+        "questions": questions,
+        "from_cache": from_cache,
+    }
+
+
+@router.post("/save-questions")
+async def save_invite_questions(
+    request: dict,
+    client=Depends(get_authed_client),
+    recruiter_id: str = Depends(get_current_user_id),
+):
+    candidate_id = request.get("candidate_id")
+    jd_id = request.get("jd_id")
+    raw_questions = request.get("questions") or []
+    if not candidate_id or not jd_id:
+        raise HTTPException(status_code=400, detail="candidate_id and jd_id are required")
+
+    owned_jd = (
+        client.table("jd_posts")
+        .select("id")
+        .eq("id", jd_id)
+        .eq("recruiter_id", recruiter_id)
+        .limit(1)
+        .execute()
+    )
+    if not owned_jd.data:
+        raise HTTPException(status_code=404, detail="Job description not found or not owned by you")
+
+    questions = [
+        _question_payload(question, index)
+        for index, question in enumerate(raw_questions)
+        if (question.get("question") or "").strip()
+    ][:5]
+    if len(questions) != 5:
+        raise HTTPException(status_code=400, detail="Please keep exactly 5 interview questions")
+
+    cached = (
+        supabase.table("interview_questions")
+        .select("questions_json")
+        .eq("candidate_id", candidate_id)
+        .eq("jd_id", jd_id)
+        .limit(1)
+        .execute()
+    )
+    if cached.data:
+        supabase.table("interview_questions").update({
+            "questions_json": questions,
+        }).eq("candidate_id", candidate_id).eq("jd_id", jd_id).execute()
+    else:
+        supabase.table("interview_questions").insert({
+            "jd_id": jd_id,
+            "candidate_id": candidate_id,
+            "questions_json": questions,
+        }).execute()
+
+    return {"saved": True, "questions": questions}
+
+
 @router.post("/create")
 async def create_invite(
     request: CreateInviteRequest,

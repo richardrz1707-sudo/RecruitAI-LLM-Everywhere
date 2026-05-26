@@ -163,6 +163,12 @@ export const saveSessionDecision = (sessionId, decision, reason = '') =>
 export const createInvite = (candidateId, jdId) =>
   api.post('/invites/create', { candidate_id: candidateId, jd_id: jdId })
 
+export const previewInviteQuestions = (candidateId, jdId) =>
+  api.post('/invites/preview-questions', { candidate_id: candidateId, jd_id: jdId })
+
+export const saveInviteQuestions = (candidateId, jdId, questions) =>
+  api.post('/invites/save-questions', { candidate_id: candidateId, jd_id: jdId, questions })
+
 export const getInvitesForJd = (jdId) =>
   api.get(`/invites/for-jd/${jdId}`)
 

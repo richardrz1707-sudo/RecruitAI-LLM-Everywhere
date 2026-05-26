@@ -7,6 +7,7 @@ import {
   getJDPosts, updateJD, archiveJD, duplicateJD, logout,
   createInvite, getApplicationsForJd, updateApplicationStatus,
   getCandidateResume, addCandidateManually, updateJdVisibility,
+  previewInviteQuestions, saveInviteQuestions,
 } from '../lib/api'
 import { useAuthStore } from '../lib/auth'
 import { toast } from '../components/Toast'
@@ -669,6 +670,9 @@ export default function DashboardPage() {
   const [loadingApplications, setLoadingApplications] = useState(false)
   // Track which candidate IDs have been invited this session (for instant UI feedback)
   const [invitedCandidateIds, setInvitedCandidateIds] = useState(new Set())
+  const [questionPreview, setQuestionPreview] = useState(null)
+  const [loadingQuestionPreview, setLoadingQuestionPreview] = useState(false)
+  const [sendingPreviewInvite, setSendingPreviewInvite] = useState(false)
 
   // Resume slide-out panel (from candidate pool / applications)
   const [resumePanel, setResumePanel]   = useState(null) // null | {name,email,resume_text,resume_url}
@@ -685,10 +689,10 @@ export default function DashboardPage() {
   const activeJds   = jdList.filter((j) => j.status === 'active')
   const archivedJds = jdList.filter((j) => j.status === 'archived')
 
-  const weightTotal = useMemo(
-    () => Object.values(weights).reduce((a, b) => a + b, 0),
-    [weights],
-  )
+  const normalisedForApi = useMemo(() => {
+    const total = Object.values(weights).reduce((a, b) => a + b, 0) || 1
+    return Object.fromEntries(Object.entries(weights).map(([k, v]) => [k, v / total]))
+  }, [weights])
 
   // ── Load JD list + candidates on mount ───────────────────────────────
   useEffect(() => {
@@ -844,13 +848,12 @@ export default function DashboardPage() {
   }
   const handleWeightChange = (key, value) => setWeights((prev) => ({ ...prev, [key]: Number(value) }))
   const handleRunMatching = async () => {
-    if (!selectedIds.size || weightTotal !== 100 || !selectedJdId) return
+    if (!selectedIds.size || !selectedJdId) return
     setMatching(true)
     setMatchError('')
     setMatchResults([])
     try {
-      const weightsAsDecimals = Object.fromEntries(Object.entries(weights).map(([k, v]) => [k, v / 100]))
-      const res = await matchCandidates(selectedJdId, [...selectedIds], weightsAsDecimals)
+      const res = await matchCandidates(selectedJdId, [...selectedIds], normalisedForApi)
       setMatchResults(res.data?.data?.results || [])
     } catch {
       setMatchError('Matching failed. Please try again.')
@@ -967,14 +970,13 @@ export default function DashboardPage() {
     }
   }
 
-  const handleInvite = async (candidateId, jdId) => {
-    // Resolve candidate name from applications, candidates pool, or match results
-    const candidateName =
+  const getCandidateDisplayName = (candidateId) =>
       applications.find((a) => a.candidates?.id === candidateId)?.candidates?.name ||
       candidates.find((c) => c.id === candidateId)?.name ||
       matchResults.find((m) => m.candidate_id === candidateId)?.candidate_name ||
       'Candidate'
 
+  const sendInvite = async (candidateId, jdId, candidateName) => {
     // Optimistic update: mark as invited in applications list immediately
     setApplications((prev) =>
       prev.map((a) =>
@@ -986,6 +988,7 @@ export default function DashboardPage() {
     try {
       await createInvite(candidateId, jdId)
       toast.success(`Invite sent to ${candidateName}`)
+      return true
     } catch (err) {
       // Revert optimistic updates on failure
       setApplications((prev) =>
@@ -999,6 +1002,66 @@ export default function DashboardPage() {
         return next
       })
       toast.error(err.response?.data?.detail || 'Failed to send invite')
+      return false
+    }
+  }
+
+  const handleInvite = async (candidateId, jdId) => {
+    setLoadingQuestionPreview(true)
+    setQuestionPreview({
+      candidateId,
+      jdId,
+      candidateName: getCandidateDisplayName(candidateId),
+      jdTitle: selectedJd?.title || '',
+      questions: [],
+    })
+    try {
+      const res = await previewInviteQuestions(candidateId, jdId)
+      setQuestionPreview({
+        candidateId,
+        jdId,
+        candidateName: res.data?.candidate_name || getCandidateDisplayName(candidateId),
+        jdTitle: res.data?.jd_title || selectedJd?.title || '',
+        questions: res.data?.questions || [],
+      })
+    } catch (err) {
+      setQuestionPreview(null)
+      toast.error(err.response?.data?.detail || 'Failed to load interview questions')
+      if (window.confirm('Question preview failed. Send the invite without preview?')) {
+        await sendInvite(candidateId, jdId, getCandidateDisplayName(candidateId))
+      }
+    } finally {
+      setLoadingQuestionPreview(false)
+    }
+  }
+
+  const handlePreviewQuestionChange = (index, value) => {
+    setQuestionPreview((prev) => {
+      if (!prev) return prev
+      const questions = [...prev.questions]
+      questions[index] = { ...questions[index], question: value }
+      return { ...prev, questions }
+    })
+  }
+
+  const handleSendPreviewInvite = async () => {
+    if (!questionPreview) return
+    const { candidateId, jdId, candidateName } = questionPreview
+    const questions = questionPreview.questions || []
+    if (questions.length !== 5 || questions.some((q) => !(q.question || '').trim())) {
+      toast.error('Please keep all 5 interview questions filled in')
+      return
+    }
+
+    setSendingPreviewInvite(true)
+    try {
+      await saveInviteQuestions(candidateId, jdId, questions)
+      const sent = await sendInvite(candidateId, jdId, candidateName)
+      if (sent) setQuestionPreview(null)
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to save interview questions')
+    } finally {
+      setSendingPreviewInvite(false)
     }
   }
 
@@ -1025,7 +1088,7 @@ export default function DashboardPage() {
     }
   }
 
-  const canRunMatch = selectedIds.size > 0 && weightTotal === 100 && !!selectedJdId && !matching
+  const canRunMatch = selectedIds.size > 0 && !!selectedJdId && !matching
 
   // ── Render ────────────────────────────────────────────────────────────
   return (
@@ -1044,6 +1107,68 @@ export default function DashboardPage() {
             ? () => openResume(reviewDetail.candidate_name, reviewDetail.candidate_email, reviewDetail.resume_text)
             : null}
         />
+      )}
+
+      {questionPreview && (
+        <div className="fixed inset-0 z-[70] bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-gray-200 shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="px-5 py-4 border-b border-gray-100 flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h2 className="text-base font-semibold text-gray-900">Preview Interview Questions</h2>
+                <p className="text-xs text-gray-500 mt-1 truncate">
+                  {questionPreview.candidateName}
+                  {questionPreview.jdTitle ? ` - ${questionPreview.jdTitle}` : ''}
+                </p>
+              </div>
+              <button
+                onClick={() => setQuestionPreview(null)}
+                disabled={sendingPreviewInvite}
+                className="text-xs text-gray-500 hover:text-gray-700 font-semibold"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-3">
+              {loadingQuestionPreview ? (
+                <LoadingSpinner size="sm" label="Generating interview questions..." />
+              ) : questionPreview.questions.length === 0 ? (
+                <p className="text-sm text-gray-500">No questions available yet.</p>
+              ) : (
+                questionPreview.questions.map((q, index) => (
+                  <div key={index}>
+                    <label className="block text-xs font-semibold text-gray-600 mb-1">
+                      Question {index + 1}
+                    </label>
+                    <textarea
+                      value={q.question || ''}
+                      onChange={(e) => handlePreviewQuestionChange(index, e.target.value)}
+                      rows={3}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent resize-y"
+                    />
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="px-5 py-4 border-t border-gray-100 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setQuestionPreview(null)}
+                disabled={sendingPreviewInvite}
+                className="border border-gray-300 hover:bg-gray-50 disabled:opacity-50 text-gray-700 font-medium px-4 py-2 rounded-lg text-sm transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSendPreviewInvite}
+                disabled={loadingQuestionPreview || sendingPreviewInvite || questionPreview.questions.length !== 5}
+                className="bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium px-4 py-2 rounded-lg text-sm transition-colors"
+              >
+                {sendingPreviewInvite ? 'Sending...' : 'Save Questions & Send Invite'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Resume Viewer Modal */}
@@ -1435,8 +1560,8 @@ export default function DashboardPage() {
                     <div>
                       <div className="flex items-center justify-between mb-2">
                         <p className="text-xs font-semibold text-gray-600">Scoring Weights</p>
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${weightTotal === 100 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                          {weightTotal}/100
+                        <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">
+                          Relative priority
                         </span>
                       </div>
                       <div className="space-y-2">
