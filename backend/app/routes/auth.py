@@ -4,6 +4,8 @@ No Claude calls — zero AI credit cost.
 """
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from supabase import create_client
+from app.config import settings
 from app.database import supabase, get_svc_client, get_current_user_id
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -27,9 +29,11 @@ async def signup(data: SignupRequest):
     if data.role not in ("recruiter", "candidate"):
         raise HTTPException(status_code=400, detail="Role must be 'recruiter' or 'candidate'")
 
+    email = data.email.lower().strip()
     try:
-        result = supabase.auth.sign_up({
-            "email": data.email,
+        auth_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
+        result = auth_client.auth.sign_up({
+            "email": email,
             "password": data.password,
             "options": {
                 "data": {
@@ -40,14 +44,34 @@ async def signup(data: SignupRequest):
             },
         })
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        message = str(exc)
+        if "already" in message.lower() or "registered" in message.lower():
+            raise HTTPException(status_code=400, detail="This email is already registered. Please log in instead.")
+        print(f"[auth/signup] Supabase signup failed: {message}")
+        raise HTTPException(status_code=400, detail=message or "Signup failed. Please check your email and password.")
 
     if result.user is None:
         raise HTTPException(status_code=400, detail="Signup failed — check your email/password")
 
+    try:
+        db = get_svc_client()
+        db.table("profiles").upsert({
+            "id": result.user.id,
+            "email": email,
+            "full_name": data.full_name,
+            "role": data.role,
+            "company_name": data.company_name if data.role == "recruiter" else "",
+        }).execute()
+    except Exception as exc:
+        print(f"[auth/signup] Profile upsert failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Account was created, but profile setup failed. Please check the profiles table migration.",
+        )
+
     return {
         "user_id": result.user.id,
-        "email": result.user.email,
+        "email": result.user.email or email,
         "role": data.role,
         "full_name": data.full_name,
         "access_token": result.session.access_token if result.session else None,

@@ -1,11 +1,10 @@
-import json
-import re
 from app.services.llm import call_claude
+from app.services.utils import (
+    truncate_resume, truncate_jd,
+    get_cached_resume_analysis, safe_json_parse,
+    MAX_TOKENS,
+)
 from app.database import get_svc_client
-
-# Cost-saving: truncation limits prevent oversized prompts
-RESUME_MAX_CHARS = 2000
-JD_MAX_CHARS = 1500
 
 _DEFAULT_RESULT = {
     "overall_grade": "F",
@@ -56,46 +55,21 @@ JSON structure:
 }"""
 
 
-def _extract_json(text: str) -> dict:
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        inner = lines[1:] if lines[0].startswith("```") else lines
-        if inner and inner[-1].strip() == "```":
-            inner = inner[:-1]
-        text = "\n".join(inner).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-    return {}
-
-
 async def analyse_resume(resume_text: str, jd_text: str, candidate_name: str) -> dict:
-    # Cost-saving: truncate inputs before building the prompt
-    resume_trimmed = resume_text[:RESUME_MAX_CHARS]
-    jd_trimmed = jd_text[:JD_MAX_CHARS]
-
     user_message = (
         f"Candidate: {candidate_name}\n"
-        f"JD (truncated): {jd_trimmed}\n"
-        f"Resume (truncated): {resume_trimmed}"
+        f"JD (truncated): {truncate_jd(jd_text)}\n"
+        f"Resume (truncated): {truncate_resume(resume_text)}"
     )
     messages = [{"role": "user", "content": user_message}]
-
     try:
         result = await call_claude(
             _SYSTEM_PROMPT,
             messages,
-            max_tokens=800,
+            max_tokens=MAX_TOKENS["resume_analysis"],
             model="claude-haiku-4-5-20251001",
         )
-        parsed = _extract_json(result)
+        parsed = safe_json_parse(result, fallback={})
         if not parsed or "scores" not in parsed:
             return _DEFAULT_RESULT.copy()
         return parsed

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   getCandidateProfile, uploadMyResume, getJdPool, applyToJd,
-  getMyApplications, getMyInvites, parseResumeOnly, getResumeUploadHistory,
+  getMyApplications, getMyInvites, refreshMyInviteToken, parseResumeOnly, getResumeUploadHistory,
   getPublicJDList, analyseResume, getAnalysisHistory, getSessionsByEmail,
   getMyFeedbackHistory, getFeedbackHistoryByEmail,
 } from '../lib/api'
@@ -125,7 +125,6 @@ export default function CandidateDashboard() {
   // ── Load on mount ────────────────────────────────────────────────────────
   useEffect(() => {
     loadProfile()
-    loadInvites()
     loadJdPool()
     loadApplications()
     getPublicJDList()
@@ -141,6 +140,14 @@ export default function CandidateDashboard() {
       loadScreeningHistory(savedEmail)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Load invites whenever the authenticated user is known ─────────────────
+  // Kept separate so a late-resolving auth token triggers a fresh fetch.
+  useEffect(() => {
+    if (user) {
+      loadInvites()
+    }
+  }, [user]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Data loaders ─────────────────────────────────────────────────────────
   const loadProfile = async () => {
@@ -168,8 +175,10 @@ export default function CandidateDashboard() {
     setLoadingInvites(true)
     try {
       const r = await getMyInvites()
+      console.log('[CandidateDashboard] Invites response:', r.data)
       setInvites(r.data?.invites || [])
-    } catch {
+    } catch (err) {
+      console.error('[CandidateDashboard] Failed to fetch invites:', err)
       setInvites([])
     } finally {
       setLoadingInvites(false)
@@ -353,6 +362,16 @@ export default function CandidateDashboard() {
     setHistoryEmailInput('')
     setFeedbackEmailInput('')
     setPastSessions([])
+  }
+
+  const handleStartInvite = async (invite) => {
+    try {
+      const refreshed = await refreshMyInviteToken(invite.id)
+      await loadInvites()
+      navigate(`/screen/${refreshed.data?.token || invite.token}`)
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to open screening invite')
+    }
   }
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -619,7 +638,7 @@ export default function CandidateDashboard() {
                       <div className="flex-shrink-0">
                         {inv.status === 'pending' && (
                           <button
-                            onClick={() => navigate(`/screen/${inv.token}`)}
+                            onClick={() => handleStartInvite(inv)}
                             className="bg-teal-600 hover:bg-teal-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap"
                           >
                             Start Screening →
@@ -627,7 +646,7 @@ export default function CandidateDashboard() {
                         )}
                         {inv.status === 'started' && (
                           <button
-                            onClick={() => navigate(`/screen/${inv.token}`)}
+                            onClick={() => handleStartInvite(inv)}
                             className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap"
                           >
                             Continue →

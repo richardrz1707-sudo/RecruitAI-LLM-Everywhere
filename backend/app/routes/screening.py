@@ -11,7 +11,7 @@ from app.models.schemas import (
     ScreeningAnswerRequest,
     SessionDecisionRequest,
 )
-from app.database import supabase, get_authed_client
+from app.database import supabase, get_authed_client, get_current_user_id
 from app.services.screening_agent import (
     get_or_create_questions,
     evaluate_answer,
@@ -197,7 +197,19 @@ def resolve_feedback_candidate_id(session):
 async def create_screening_link(
     req: CreateScreeningLinkRequest,
     client=Depends(get_authed_client),
+    recruiter_id: str = Depends(get_current_user_id),
 ):
+    jd = (
+        client.table("jd_posts")
+        .select("id")
+        .eq("id", req.jd_id)
+        .eq("recruiter_id", recruiter_id)
+        .limit(1)
+        .execute()
+    )
+    if not jd.data:
+        raise HTTPException(status_code=404, detail="Job description not found or not owned by you")
+
     existing = (
         client.table("screening_links")
         .select("token")
@@ -225,7 +237,22 @@ async def create_screening_link(
 
 # ── 2. Get existing link info for a JD (recruiter — auth required) ───────
 @router.get("/link/{jd_id}")
-async def get_screening_link(jd_id: str, client=Depends(get_authed_client)):
+async def get_screening_link(
+    jd_id: str,
+    client=Depends(get_authed_client),
+    recruiter_id: str = Depends(get_current_user_id),
+):
+    jd = (
+        client.table("jd_posts")
+        .select("id")
+        .eq("id", jd_id)
+        .eq("recruiter_id", recruiter_id)
+        .limit(1)
+        .execute()
+    )
+    if not jd.data:
+        raise HTTPException(status_code=404, detail="Job description not found or not owned by you")
+
     result = (
         client.table("screening_links")
         .select("token, created_at, interview_mode")
@@ -249,11 +276,12 @@ async def start_screening(token: str):
     """
     Checks invite table first (direct invite flow), falls back to legacy
     screening_links. Returns enough metadata for the frontend to adapt its UI.
+    Uses service-role client so RLS never blocks public token lookups.
     """
     # ── Direct invite flow ────────────────────────────────────────────────
     invite = (
         supabase.table("screening_invites")
-        .select("*, jd_posts(title, jd_text), candidates(name, email, resume_text)")
+        .select("*")
         .eq("token", token)
         .limit(1)
         .execute()
@@ -266,30 +294,55 @@ async def start_screening(token: str):
         if inv["status"] == "completed":
             raise HTTPException(status_code=409, detail="You have already completed this screening")
 
-        jd = inv.get("jd_posts") or {}
-        candidate = inv.get("candidates") or {}
+        jd_row = (
+            supabase.table("jd_posts")
+            .select("title, jd_text")
+            .eq("id", inv["jd_id"])
+            .limit(1)
+            .execute()
+        )
+        candidate_row = (
+            supabase.table("candidates")
+            .select("name, email, resume_text")
+            .eq("id", inv["candidate_id"])
+            .limit(1)
+            .execute()
+        )
+        jd = jd_row.data[0] if jd_row.data else {}
+        candidate = candidate_row.data[0] if candidate_row.data else {}
+        # Prefer name/email stored directly on the invite record (set at creation
+        # time) so they always pre-fill even if the candidates row is sparse.
+        candidate_name = (
+            inv.get("candidate_name") or candidate.get("name", "")
+        )
+        candidate_email = (
+            inv.get("candidate_email") or candidate.get("email", "")
+        )
+        resume_text = inv.get("resume_text") or candidate.get("resume_text") or ""
         return {
             "jd_title": jd.get("title", ""),
+            "jd_id": inv["jd_id"],
             "token": token,
             "interview_mode": "speech_only",
             "invite_type": "direct_invite",
-            "candidate_name": candidate.get("name", ""),
-            "candidate_email": candidate.get("email", ""),
-            "has_resume": bool(
-                candidate.get("resume_text") or inv.get("resume_text")
-            ),
+            "invite_id": inv["id"],
+            "candidate_id": inv["candidate_id"],
+            "candidate_name": candidate_name,
+            "candidate_email": candidate_email,
+            "has_resume": bool(resume_text.strip()),
+            "resume_preview": resume_text[:100] if resume_text else "",
             "requires_registration": False,
         }
 
     # ── Legacy open-link flow ─────────────────────────────────────────────
     link = (
         supabase.table("screening_links")
-        .select("jd_id, is_active")
+        .select("jd_id")
         .eq("token", token)
         .limit(1)
         .execute()
     )
-    if link.data and link.data[0].get("is_active", True):
+    if link.data:
         jd = (
             supabase.table("jd_posts")
             .select("title")
@@ -320,13 +373,14 @@ async def register_and_start(req: RegisterCandidateRequest):
       immediately with full resume context, invite status set to 'started'.
     - Legacy open link: uses pasted resume_text (may be empty).
     CREDIT RULE: questions cached by (candidate_id, jd_id); no duplicate calls.
+    Uses service-role client so RLS never blocks public token lookups.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
 
     # ── Direct invite path ────────────────────────────────────────────────
     invite = (
         supabase.table("screening_invites")
-        .select("*, jd_posts(title, jd_text), candidates(id, profile_id, name, email, resume_text)")
+        .select("*")
         .eq("token", req.token)
         .limit(1)
         .execute()
@@ -335,10 +389,24 @@ async def register_and_start(req: RegisterCandidateRequest):
     if invite.data:
         inv = invite.data[0]
         jd_id = inv["jd_id"]
-        jd = inv.get("jd_posts") or {}
-        candidate = inv.get("candidates") or {}
+        jd_row = (
+            supabase.table("jd_posts")
+            .select("title, jd_text")
+            .eq("id", jd_id)
+            .limit(1)
+            .execute()
+        )
+        candidate_row = (
+            supabase.table("candidates")
+            .select("id, profile_id, name, email, resume_text")
+            .eq("id", inv["candidate_id"])
+            .limit(1)
+            .execute()
+        )
+        jd = jd_row.data[0] if jd_row.data else {}
+        candidate = candidate_row.data[0] if candidate_row.data else {}
 
-        candidate_id = candidate.get("id")          # candidates.id — used for question cache key
+        candidate_id = inv["candidate_id"]           # use from invite — guarantees personalisation even if candidates lookup was empty
         candidate_profile_id = candidate.get("profile_id")  # profiles.id — FK-safe (None OK)
         candidate_name = candidate.get("name") or req.candidate_name
         candidate_email = (candidate.get("email") or req.candidate_email).lower().strip()
@@ -436,11 +504,25 @@ async def register_and_start(req: RegisterCandidateRequest):
 
     resume_text = (req.resume_text or "")[:1500]
 
-    # Generic questions (no candidate_id) — cached by (null, jd_id)
+    # For personalised questions: look up candidate by email if they have a profile
+    open_link_candidate_id = None
+    if req.candidate_email:
+        email_candidate = (
+            supabase.table("candidates")
+            .select("id, resume_text")
+            .eq("email", req.candidate_email.lower().strip())
+            .limit(1)
+            .execute()
+        )
+        if email_candidate.data:
+            open_link_candidate_id = email_candidate.data[0]["id"]
+            resume_text = resume_text or (email_candidate.data[0].get("resume_text") or "")[:1500]
+
+    # Personalised if candidate found by email, generic (null) otherwise
     questions, from_cache = await get_or_create_questions(
         jd_id=jd_id,
         jd_text=jd.data["jd_text"],
-        candidate_id=None,
+        candidate_id=open_link_candidate_id,
         resume_text=resume_text,
     )
 
@@ -715,7 +797,22 @@ async def submit_answer(req: ScreeningAnswerRequest):
 
 # ── 6. Recruiter: list completed sessions (auth required) ────────────────
 @router.get("/results/{jd_id}")
-async def get_screening_results(jd_id: str, client=Depends(get_authed_client)):
+async def get_screening_results(
+    jd_id: str,
+    client=Depends(get_authed_client),
+    recruiter_id: str = Depends(get_current_user_id),
+):
+    jd = (
+        client.table("jd_posts")
+        .select("id")
+        .eq("id", jd_id)
+        .eq("recruiter_id", recruiter_id)
+        .limit(1)
+        .execute()
+    )
+    if not jd.data:
+        raise HTTPException(status_code=404, detail="Job description not found or not owned by you")
+
     sessions = (
         client.table("screening_sessions")
         .select(

@@ -1,4 +1,5 @@
 from typing import Optional, Dict, Any, List, Literal
+from datetime import datetime
 from pydantic import BaseModel
 
 
@@ -22,6 +23,7 @@ class MatchRequest(BaseModel):
     jd_id: str
     candidate_ids: List[str]
     weights: Optional[Dict[str, float]] = None
+    force_refresh: bool = False
 
 
 class UpdateJDRequest(BaseModel):
@@ -56,6 +58,12 @@ class DimensionScore(BaseModel):
     gaps: List[str]
 
 
+class ProfileSignal(BaseModel):
+    signal: str
+    type: str  # "strength" | "gap"
+    relevance: str
+
+
 class CandidateScoreResult(BaseModel):
     candidate_id: str
     candidate_name: str
@@ -68,6 +76,9 @@ class CandidateScoreResult(BaseModel):
     soft_skills_signals: DimensionScore
     industry_relevance: DimensionScore
     career_trajectory: DimensionScore
+    why_this_person: Optional[str] = ""
+    profile_signals: Optional[List[ProfileSignal]] = []
+    outreach_draft: Optional[str] = ""
 
 
 class ResumeAnalyseRequest(BaseModel):
@@ -104,7 +115,6 @@ class ResumeAnalysisResult(BaseModel):
 
 class CreateScreeningLinkRequest(BaseModel):
     jd_id: str
-    interview_mode: Literal["text_only", "speech_only"] = "text_only"
 
 
 class RegisterCandidateRequest(BaseModel):
@@ -149,3 +159,56 @@ class SessionDecisionRequest(BaseModel):
     session_id: str
     decision: Literal["advance", "reject", "hold"]
     reason: str = ""
+
+
+# ── JD visibility ─────────────────────────────────────────────────────────
+
+class UpdateJDVisibilityRequest(BaseModel):
+    jd_id: str
+    visibility: Literal["open", "invite_only"]
+
+
+# ── Candidate profile ─────────────────────────────────────────────────────
+
+class CandidateProfileUpdate(BaseModel):
+    headline: Optional[str] = None
+    location: Optional[str] = None
+
+
+# ── JD Application ────────────────────────────────────────────────────────
+
+class CreateApplicationRequest(BaseModel):
+    jd_id: str
+    resume_text: str = ""
+    cover_note: str = ""
+
+
+class UpdateApplicationStatusRequest(BaseModel):
+    application_id: str
+    status: Literal["applied", "shortlisted", "invited", "rejected"]
+
+
+# ── Screening invite ──────────────────────────────────────────────────────
+
+class CreateInviteRequest(BaseModel):
+    candidate_id: str
+    jd_id: str
+
+
+class InviteResponse(BaseModel):
+    invite_id: str
+    token: str
+    candidate_name: str
+    jd_title: str
+    status: str
+
+
+# ── Candidate feedback ────────────────────────────────────────────────────
+
+class FeedbackResponse(BaseModel):
+    session_id: str
+    overall_score: Optional[float] = None
+    dimension_feedback: dict
+    coaching_tips: list
+    improvement_areas: list
+    recommended_jds: list

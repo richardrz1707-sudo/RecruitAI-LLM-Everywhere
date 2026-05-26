@@ -160,7 +160,6 @@ function IntegrityAgreementModal({ onAgree, onCancel, loading, error }) {
             </p>
             <ul className="list-disc list-inside space-y-1 text-gray-600">
               <li>Response timing — how long you take to answer each question</li>
-              <li>Copy-paste activity — whether answers are pasted rather than typed</li>
               <li>Tab and window switching — if you navigate away during the interview</li>
               <li>AI-generated content detection — whether answers appear to be written by AI tools</li>
             </ul>
@@ -170,9 +169,9 @@ function IntegrityAgreementModal({ onAgree, onCancel, loading, error }) {
             <p className="font-semibold text-gray-900 mb-1">Prohibited actions</p>
             <p className="mb-2">The following are strictly prohibited during this screening:</p>
             <ul className="list-disc list-inside space-y-1 text-gray-600">
-              <li>Using ChatGPT, Claude, Gemini, or any AI tool to generate your answers</li>
-              <li>Copying answers from any external source</li>
-              <li>Receiving assistance from another person during the session</li>
+              <li>Using ChatGPT, Claude, Gemini, or any AI tool to assist your answers</li>
+              <li>Reading from physical or digital notes during your response</li>
+              <li>Being coached or prompted by another person during the session</li>
               <li>Searching the internet for answers during the session</li>
             </ul>
           </div>
@@ -247,8 +246,8 @@ export default function ScreeningPage() {
   const [loadingJd, setLoadingJd] = useState(true)
   const [linkError, setLinkError] = useState('')
   const [jdTitle, setJdTitle] = useState('')
-  const [interviewMode, setInterviewMode] = useState('text_only')
-
+  const [interviewType, setInterviewType] = useState('open_link')   // 'direct_invite' | 'open_link'
+  const [resumePreloaded, setResumePreloaded] = useState(false)
   // Views: welcome | interview | complete
   const [view, setView] = useState('welcome')
 
@@ -278,13 +277,16 @@ export default function ScreeningPage() {
   const [finalGrade, setFinalGrade] = useState(null)
   const [headline, setHeadline] = useState('')
 
+  // Recording duration timer
+  const [recordingDuration, setRecordingDuration] = useState(0)
+  const recordingTimerRef = useRef(null)
+
   // Speech metrics (accumulated per answer, sent with submission)
   const speechMetricsRef = useRef(null)
 
   // ── Tier 1: Integrity signal tracking refs ────────────────────────────
   const questionShownAtRef = useRef(null)
   const firstKeystrokeAtRef = useRef(null)
-  const pasteEventsRef = useRef([])
   const tabSwitchesRef = useRef([])
   const tabLeftAtRef = useRef(null)
 
@@ -300,13 +302,26 @@ export default function ScreeningPage() {
     },
   )
 
+  // ── Recording duration timer ──────────────────────────────────────────
+  // Must be after useSpeechRecognition so isRecording is in scope
+  useEffect(() => {
+    if (isRecording) {
+      setRecordingDuration(0)
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration((d) => d + 1)
+      }, 1000)
+    } else {
+      clearInterval(recordingTimerRef.current)
+    }
+    return () => clearInterval(recordingTimerRef.current)
+  }, [isRecording])
+
   // Set up/tear down integrity tracking whenever the displayed question changes
   useEffect(() => {
     if (view !== 'interview') return
 
     questionShownAtRef.current = Date.now()
     firstKeystrokeAtRef.current = null
-    pasteEventsRef.current = []
     tabSwitchesRef.current = []
     tabLeftAtRef.current = null
     speechMetricsRef.current = null
@@ -347,13 +362,6 @@ export default function ScreeningPage() {
     }
   }
 
-  const handlePaste = () => {
-    pasteEventsRef.current = [
-      ...pasteEventsRef.current,
-      { pasted_at: Date.now(), paste_index: pasteEventsRef.current.length + 1 },
-    ]
-  }
-
   const buildIntegritySignals = (submittedAt) => {
     const totalTimeAway = tabSwitchesRef.current.reduce((sum, s) => sum + s.duration_ms, 0)
     return {
@@ -365,8 +373,6 @@ export default function ScreeningPage() {
         ? submittedAt - questionShownAtRef.current
         : null,
       answer_word_count: wordCount(answer),
-      was_pasted: pasteEventsRef.current.length > 0,
-      paste_count: pasteEventsRef.current.length,
       tab_switch_count: tabSwitchesRef.current.length,
       total_time_away_ms: totalTimeAway,
     }
@@ -374,16 +380,33 @@ export default function ScreeningPage() {
 
   // ── JD verification on mount ──────────────────────────────────────────
   useEffect(() => {
-    startScreening(token)
-      .then((r) => {
-        setJdTitle(r.data.jd_title)
-        setInterviewMode(r.data.interview_mode || 'text_only')
+    if (!token) return
+    const load = async () => {
+      try {
+        const res = await startScreening(token)
+        const data = res.data
+        setJdTitle(data.jd_title)
+        setInterviewType(data.invite_type || 'open_link')
+        setResumePreloaded(data.has_resume || false)
+        // Pre-fill name and email for direct invites
+        if (data.invite_type === 'direct_invite') {
+          if (data.candidate_name) setCandidateName(data.candidate_name)
+          if (data.candidate_email) setCandidateEmail(data.candidate_email)
+        }
         setLoadingJd(false)
-      })
-      .catch(() => {
-        setLinkError('This screening link is invalid or has expired.')
+      } catch (err) {
+        const status = err.response?.status
+        if (status === 410) {
+          setLinkError('This invite has expired. Please contact the recruiter for a new link.')
+        } else if (status === 409) {
+          setLinkError('You have already completed this screening. Check your email for recruiter updates.')
+        } else {
+          setLinkError('Invalid or expired invite link.')
+        }
         setLoadingJd(false)
-      })
+      }
+    }
+    load()
   }, [token])
 
   // ── View 1: "Begin Screening" click ──────────────────────────────────
@@ -410,9 +433,10 @@ export default function ScreeningPage() {
       })
       setShowAgreementModal(false)
       setSessionId(r.data.session_id)
-      setCurrentQuestion(r.data.question)
-      setCurrentIndex(r.data.current_index)
-      setTotalQuestions(r.data.total_questions)
+      const fq = r.data.first_question
+      setCurrentQuestion(fq)
+      setCurrentIndex(0)
+      setTotalQuestions(fq?.total_questions ?? 5)
       setView('interview')
     } catch (e) {
       setRegisterError(
@@ -455,12 +479,17 @@ export default function ScreeningPage() {
         speechMetrics,
       )
       setAnswer('')
+      setRecordingDuration(0)
       speechMetricsRef.current = null // reset for next question
 
       if (r.data.is_complete) {
         setFinalScore(r.data.final_score)
         setFinalGrade(r.data.final_grade)
         setHeadline(r.data.headline)
+        // Persist email so CandidateDashboard can restore history after logout
+        if (candidateEmail) {
+          localStorage.setItem('recruitai_candidate_email', candidateEmail.toLowerCase().trim())
+        }
         setView('complete')
       } else if (r.data.needs_followup) {
         setFollowupQuestion(r.data.follow_up_question)
@@ -496,11 +525,15 @@ export default function ScreeningPage() {
   }
 
   if (linkError) {
+    const isExpired   = linkError.includes('expired')
+    const isCompleted = linkError.includes('already completed')
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
         <div className="bg-white rounded-2xl shadow-lg p-8 max-w-sm text-center space-y-4">
-          <div className="text-4xl">❌</div>
-          <h1 className="text-xl font-bold text-gray-900">Link Not Found</h1>
+          <div className="text-4xl">{isCompleted ? '✅' : isExpired ? '⏰' : '❌'}</div>
+          <h1 className="text-xl font-bold text-gray-900">
+            {isCompleted ? 'Already Completed' : isExpired ? 'Invite Expired' : 'Link Not Found'}
+          </h1>
           <p className="text-sm text-gray-600">{linkError}</p>
         </div>
       </div>
@@ -508,7 +541,7 @@ export default function ScreeningPage() {
   }
 
   const wc = wordCount(answer)
-  const fillerCount = interviewMode !== 'text_only' ? countFillerWords(answer).count : 0
+  const fillerCount = countFillerWords(answer).count
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
@@ -539,23 +572,27 @@ export default function ScreeningPage() {
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-800 space-y-1.5">
               <p className="font-semibold mb-1">What to expect</p>
               <ul className="list-disc list-inside space-y-1 text-blue-700">
-                {interviewMode === 'speech_only' ? (
-                  <>
-                    <li>5 spoken interview questions — microphone required</li>
-                    <li>Speak your answers clearly when recording</li>
-                    <li>Takes about 10–15 minutes</li>
-                    <li>AI evaluates your responses immediately</li>
-                  </>
-                ) : (
-                  <>
-                    <li>5 short written interview questions</li>
-                    <li>Answer at your own pace — no time limit</li>
-                    <li>Takes about 10–15 minutes</li>
-                    <li>AI evaluates your responses immediately</li>
-                  </>
-                )}
+                <li>5 spoken interview questions — microphone required</li>
+                <li>Speak your answers clearly when recording</li>
+                <li>Takes about 10–15 minutes</li>
+                <li>AI evaluates your responses immediately</li>
               </ul>
             </div>
+
+            {/* Direct invite banner */}
+            {interviewType === 'direct_invite' && (
+              <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 flex items-start gap-3">
+                <span className="text-teal-600 text-lg leading-none mt-0.5">✓</span>
+                <div>
+                  <p className="text-sm font-semibold text-teal-800">
+                    You have been personally invited for this role
+                  </p>
+                  <p className="text-xs text-teal-600 mt-1">
+                    Your resume is already on file. Questions will be tailored to your background.
+                  </p>
+                </div>
+              </div>
+            )}
 
             <div className="space-y-4">
               <div>
@@ -565,9 +602,16 @@ export default function ScreeningPage() {
                 <input
                   type="text"
                   value={candidateName}
-                  onChange={(e) => setCandidateName(e.target.value)}
+                  onChange={interviewType === 'direct_invite'
+                    ? undefined
+                    : (e) => setCandidateName(e.target.value)}
+                  readOnly={interviewType === 'direct_invite'}
                   placeholder="Your full name"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className={`w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    interviewType === 'direct_invite'
+                      ? 'border-gray-200 bg-gray-50 text-gray-500 cursor-not-allowed'
+                      : 'border-gray-300'
+                  }`}
                 />
               </div>
               <div>
@@ -577,24 +621,34 @@ export default function ScreeningPage() {
                 <input
                   type="email"
                   value={candidateEmail}
-                  onChange={(e) => setCandidateEmail(e.target.value)}
+                  onChange={interviewType === 'direct_invite'
+                    ? undefined
+                    : (e) => setCandidateEmail(e.target.value)}
+                  readOnly={interviewType === 'direct_invite'}
                   placeholder="your@email.com"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className={`w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    interviewType === 'direct_invite'
+                      ? 'border-gray-200 bg-gray-50 text-gray-500 cursor-not-allowed'
+                      : 'border-gray-300'
+                  }`}
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Resume / Experience{' '}
-                  <span className="text-gray-400 font-normal">(optional but recommended)</span>
-                </label>
-                <textarea
-                  value={resumeText}
-                  onChange={(e) => setResumeText(e.target.value)}
-                  rows={4}
-                  placeholder="Paste your resume text or briefly describe your background…"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
-                />
-              </div>
+              {/* Resume paste — only for legacy open links */}
+              {interviewType === 'open_link' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Resume / Experience{' '}
+                    <span className="text-gray-400 font-normal">(optional — improves question quality)</span>
+                  </label>
+                  <textarea
+                    value={resumeText}
+                    onChange={(e) => setResumeText(e.target.value)}
+                    rows={4}
+                    placeholder="Paste your resume text or briefly describe your background…"
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                  />
+                </div>
+              )}
             </div>
 
             {/* Integrity notice */}
@@ -603,12 +657,10 @@ export default function ScreeningPage() {
                 🔒 This screening includes integrity monitoring and requires agreement to
                 our academic honesty policy before you can proceed.
               </div>
-              {interviewMode === 'speech_only' && (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-blue-800 text-sm">
-                  🎙 This screening uses voice-only mode. Please ensure your microphone is
-                  enabled in your browser.
-                </div>
-              )}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-blue-800 text-sm">
+                🎙 This screening uses voice-only mode. Please ensure your microphone is
+                enabled in your browser.
+              </div>
             </div>
 
             <button
@@ -616,7 +668,7 @@ export default function ScreeningPage() {
               disabled={!candidateName.trim() || !candidateEmail.trim()}
               className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-semibold py-3 rounded-xl text-sm transition-colors"
             >
-              Begin Screening →
+              {interviewType === 'direct_invite' ? 'Begin My Interview →' : 'Begin Screening →'}
             </button>
           </div>
         )}
@@ -663,80 +715,64 @@ export default function ScreeningPage() {
                 </div>
               ) : (
                 <div className="bg-gray-50 rounded-xl p-4">
-                  <p className="text-xs font-bold text-gray-400 mb-1.5 tracking-wide">
-                    QUESTION {currentIndex + 1}
-                  </p>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <p className="text-xs font-bold text-gray-400 tracking-wide">
+                      QUESTION {currentIndex + 1}
+                    </p>
+                    {currentQuestion?.probes_skill && (
+                      <span className="text-xs bg-teal-50 text-teal-700 px-2 py-0.5 rounded-full font-medium">
+                        {currentQuestion.probes_skill}
+                      </span>
+                    )}
+                  </div>
                   <p className="text-gray-800 font-medium leading-relaxed text-base">
                     {currentQuestion?.question}
                   </p>
                 </div>
               )}
 
-              {/* ── Answer area — 3 different UIs based on mode ─────────── */}
-
-              {/* TEXT ONLY */}
-              {interviewMode === 'text_only' && (
-                <textarea
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  onPaste={handlePaste}
-                  rows={6}
-                  placeholder="Type your answer here… (at least 10 words)"
-                  className="w-full border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
-                />
-              )}
-
-              {/* SPEECH ONLY — read-only transcript, textarea is hidden */}
-              {interviewMode === 'speech_only' && (
-                <div className="space-y-3">
-                  {/* Record control */}
-                  <div className="flex items-center gap-3">
-                    {!isRecording ? (
-                      <button
-                        onClick={startRecording}
-                        className="flex items-center gap-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors"
-                      >
-                        <span className="w-2.5 h-2.5 bg-white rounded-full" />
-                        Start Recording
-                      </button>
-                    ) : (
-                      <button
-                        onClick={stopRecording}
-                        className="flex items-center gap-2 bg-gray-700 hover:bg-gray-800 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors"
-                      >
-                        <span className="w-2.5 h-2.5 bg-white rounded-full animate-pulse" />
-                        Stop Recording
-                      </button>
-                    )}
-                    {isRecording && (
-                      <span className="text-xs text-red-500 font-medium animate-pulse">
-                        ● Recording…
-                      </span>
-                    )}
-                  </div>
-                  {/* Read-only transcript display */}
-                  <div className="min-h-[9rem] border border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm text-gray-700 leading-relaxed">
-                    {answer ? (
-                      <p>{answer}</p>
-                    ) : (
-                      <p className="text-gray-400 italic">
-                        Your speech will appear here as you speak…
-                      </p>
-                    )}
-                  </div>
+              {/* ── Speech answer area ───────────────────────────────── */}
+              <div className="space-y-4">
+                <div className="flex flex-col items-center gap-3 py-2">
+                  <button
+                    onClick={isRecording ? stopRecording : startRecording}
+                    className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-200 shadow-lg ${
+                      isRecording
+                        ? 'bg-red-500 hover:bg-red-600 ring-4 ring-red-200 animate-pulse'
+                        : 'bg-teal-600 hover:bg-teal-700 scale-100 hover:scale-105'
+                    }`}
+                  >
+                    <span className="text-3xl">{isRecording ? '⏹' : '🎙'}</span>
+                  </button>
+                  <span className={`text-sm font-medium ${isRecording ? 'text-red-500 animate-pulse' : 'text-gray-500'}`}>
+                    {isRecording ? '● Recording — tap to stop' : 'Tap to speak'}
+                  </span>
                 </div>
-              )}
+                {/* Read-only transcript display */}
+                <div className="min-h-[7rem] border border-gray-200 bg-gray-50 rounded-xl px-4 py-3 text-sm text-gray-700 leading-relaxed">
+                  {answer ? (
+                    <p>{answer}</p>
+                  ) : (
+                    <p className="text-gray-400 italic">
+                      Your speech will appear here as you speak…
+                    </p>
+                  )}
+                </div>
+              </div>
 
-              {/* Stats row — word count + filler count for speech mode */}
-              <div className="flex items-center justify-between">
-                <span className={`text-xs ${wc < 10 ? 'text-red-400' : 'text-gray-400'}`}>
-                  {wc} word{wc !== 1 ? 's' : ''}
-                  {wc < 10 ? ' — minimum 10 words' : ''}
-                </span>
-                {interviewMode !== 'text_only' && answer && (
+              {/* Stats row — duration, word count, filler count */}
+              <div className="flex items-center gap-4 flex-wrap">
+                {(isRecording || recordingDuration > 0) && (
                   <span className="text-xs text-gray-400">
-                    {fillerCount} filler word{fillerCount !== 1 ? 's' : ''} detected
+                    ⏱ {Math.floor(recordingDuration / 60)}:{String(recordingDuration % 60).padStart(2, '0')}
+                  </span>
+                )}
+                <span className={`text-xs ${wc < 10 ? 'text-red-400' : 'text-gray-400'}`}>
+                  📝 {wc} word{wc !== 1 ? 's' : ''}{wc < 10 ? ' — min 10' : ''}
+                </span>
+                {answer && fillerCount > 0 && (
+                  <span className="text-xs text-gray-400">
+                    💬 {fillerCount} filler word{fillerCount !== 1 ? 's' : ''}
                   </span>
                 )}
               </div>

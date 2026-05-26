@@ -5,6 +5,8 @@ import {
   createScreeningLink, getScreeningLink, getScreeningResults,
   getScreeningSessionDetail, saveSessionDecision,
   getJDPosts, updateJD, archiveJD, duplicateJD, logout,
+  createInvite, getApplicationsForJd, updateApplicationStatus,
+  getCandidateResume, addCandidateManually, updateJdVisibility,
 } from '../lib/api'
 import { useAuthStore } from '../lib/auth'
 import { toast } from '../components/Toast'
@@ -76,7 +78,6 @@ const DIM_LABELS = {
 
 function FlagBadge({ flag }) {
   const config = {
-    paste_detected: { icon: '📋', color: 'text-amber-700 bg-amber-50 border-amber-200' },
     unusually_fast: { icon: '⚡', color: 'text-amber-700 bg-amber-50 border-amber-200' },
     tab_switching:  { icon: '👁',  color: 'text-amber-700 bg-amber-50 border-amber-200' },
     ai_generated:   { icon: '🤖', color: 'text-red-700 bg-red-50 border-red-200' },
@@ -86,28 +87,6 @@ function FlagBadge({ flag }) {
     <div className={`flex items-start gap-2 text-xs border rounded-lg px-3 py-2 ${color}`}>
       <span className="flex-shrink-0">{icon}</span>
       <span>{flag.detail}</span>
-    </div>
-  )
-}
-
-function ModeSelectorCards({ selectedMode, onSelect }) {
-  return (
-    <div className="grid grid-cols-2 gap-3">
-      {Object.entries(INTERVIEW_MODES).map(([mode, cfg]) => (
-        <button
-          key={mode}
-          onClick={() => onSelect(mode)}
-          className={`p-3 rounded-xl border-2 text-left transition-all duration-200 ${
-            selectedMode === mode
-              ? 'border-teal-500 bg-teal-50'
-              : 'border-gray-200 hover:border-gray-300 bg-white'
-          }`}
-        >
-          <div className="text-xl mb-1">{cfg.icon}</div>
-          <div className="text-xs font-semibold text-gray-800">{cfg.label}</div>
-          <div className="text-xs text-gray-500 mt-0.5 leading-snug">{cfg.description}</div>
-        </button>
-      ))}
     </div>
   )
 }
@@ -390,7 +369,14 @@ function AnswerReviewPanel({ sessionRow, detail, loadingDetail, jdTitle, onClose
                       return (
                         <div key={index} data-qa-card={index} className="space-y-2.5">
                           <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-gray-400 uppercase tracking-widest">Question {index + 1} of {totalQs}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-gray-400 uppercase tracking-widest">Question {index + 1} of {totalQs}</span>
+                              {mainEntry?.probes_skill && (
+                                <span className="text-xs bg-teal-50 text-teal-700 px-2 py-0.5 rounded-full">
+                                  {mainEntry.probes_skill}
+                                </span>
+                              )}
+                            </div>
                             {primaryScore !== null && (
                               <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${primaryScore >= 80 ? 'bg-green-100 text-green-700' : primaryScore >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>
                                 {DIM_LABELS[primaryDim]}: {primaryScore}
@@ -658,9 +644,6 @@ export default function DashboardPage() {
   const [screeningLink, setScreeningLink]       = useState(null)
   const [creatingLink, setCreatingLink]         = useState(false)
   const [linkCopied, setLinkCopied]             = useState(false)
-  const [selectedMode, setSelectedMode]         = useState('text_only')
-  const [showModeSelector, setShowModeSelector] = useState(false)
-
   // Screening results
   const [screeningResults, setScreeningResults] = useState([])
   const [loadingResults, setLoadingResults]     = useState(false)
@@ -680,6 +663,22 @@ export default function DashboardPage() {
   const [resumeModal, setResumeModal] = useState(null) // null | { name, email, resume_text, resume_url }
   const openResume = (name, email, resume_text, resume_url = '') =>
     setResumeModal({ name, email, resume_text: resume_text || '', resume_url: resume_url || '' })
+
+  // Applications (self-applicants per JD)
+  const [applications, setApplications]           = useState([])
+  const [loadingApplications, setLoadingApplications] = useState(false)
+  // Track which candidate IDs have been invited this session (for instant UI feedback)
+  const [invitedCandidateIds, setInvitedCandidateIds] = useState(new Set())
+
+  // Resume slide-out panel (from candidate pool / applications)
+  const [resumePanel, setResumePanel]   = useState(null) // null | {name,email,resume_text,resume_url}
+  const [loadingResume, setLoadingResume] = useState(false)
+
+  // Add candidate manually modal
+  const [showAddCandidate, setShowAddCandidate]   = useState(false)
+  const [addCandidateForm, setAddCandidateForm]   = useState({ name: '', email: '', resume: null })
+  const [addingCandidate, setAddingCandidate]     = useState(false)
+  const [addCandidateError, setAddCandidateError] = useState('')
 
   // Derived
   const selectedJd = jdList.find((j) => j.id === selectedJdId) || null
@@ -707,6 +706,7 @@ export default function DashboardPage() {
       setMatchResults([])
       setSelectedSession(null)
       setSessionDetail(null)
+      setApplications([])
       return
     }
     setIsEditing(false)
@@ -720,7 +720,6 @@ export default function DashboardPage() {
       .then((r) => {
         if (r.data?.token) {
           setScreeningLink(r.data)
-          setSelectedMode(r.data.interview_mode || 'text_only')
         } else {
           setScreeningLink(null)
         }
@@ -728,6 +727,7 @@ export default function DashboardPage() {
       .catch(() => setScreeningLink(null))
 
     loadScreeningResults(selectedJdId)
+    loadApplications(selectedJdId)
   }, [selectedJdId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadJdList = async () => {
@@ -865,9 +865,8 @@ export default function DashboardPage() {
     if (!selectedJdId) return
     setCreatingLink(true)
     try {
-      const r = await createScreeningLink(selectedJdId, selectedMode)
+      const r = await createScreeningLink(selectedJdId)
       setScreeningLink(r.data)
-      setShowModeSelector(false)
       toast.success('Screening link created!')
     } catch {
       toast.error('Failed to create screening link')
@@ -927,6 +926,105 @@ export default function DashboardPage() {
     setScreeningResults((prev) => prev.map((r) => r.session_id === sessionId ? { ...r, recruiter_decision: decision } : r))
   }
 
+  // ── Applications ──────────────────────────────────────────────────────────
+  const loadApplications = (jdId) => {
+    setLoadingApplications(true)
+    getApplicationsForJd(jdId)
+      .then((r) => {
+        const apps = r.data?.applications || []
+        setApplications(apps)
+        // Pre-populate the invited set from any already-invited applications
+        const alreadyInvited = new Set(
+          apps.filter((a) => a.status === 'invited').map((a) => a.candidates?.id).filter(Boolean)
+        )
+        setInvitedCandidateIds(alreadyInvited)
+      })
+      .catch(() => {})
+      .finally(() => setLoadingApplications(false))
+  }
+
+  const handleVisibilityToggle = async (jdId, currentVisibility) => {
+    const next = currentVisibility === 'open' ? 'invite_only' : 'open'
+    try {
+      await updateJdVisibility(jdId, next)
+      setJdList((prev) => prev.map((j) => j.id === jdId ? { ...j, visibility: next } : j))
+      toast.success(`JD is now ${next === 'open' ? 'publicly visible' : 'invite-only'}`)
+    } catch {
+      toast.error('Failed to update visibility')
+    }
+  }
+
+  const handleViewResume = async (candidateId) => {
+    setLoadingResume(true)
+    setResumePanel(null)
+    try {
+      const r = await getCandidateResume(candidateId)
+      setResumePanel(r.data)
+    } catch {
+      toast.error('Failed to load resume')
+    } finally {
+      setLoadingResume(false)
+    }
+  }
+
+  const handleInvite = async (candidateId, jdId) => {
+    // Resolve candidate name from applications, candidates pool, or match results
+    const candidateName =
+      applications.find((a) => a.candidates?.id === candidateId)?.candidates?.name ||
+      candidates.find((c) => c.id === candidateId)?.name ||
+      matchResults.find((m) => m.candidate_id === candidateId)?.candidate_name ||
+      'Candidate'
+
+    // Optimistic update: mark as invited in applications list immediately
+    setApplications((prev) =>
+      prev.map((a) =>
+        a.candidates?.id === candidateId ? { ...a, status: 'invited' } : a
+      )
+    )
+    setInvitedCandidateIds((prev) => new Set([...prev, candidateId]))
+
+    try {
+      await createInvite(candidateId, jdId)
+      toast.success(`Invite sent to ${candidateName}`)
+    } catch (err) {
+      // Revert optimistic updates on failure
+      setApplications((prev) =>
+        prev.map((a) =>
+          a.candidates?.id === candidateId ? { ...a, status: 'applied' } : a
+        )
+      )
+      setInvitedCandidateIds((prev) => {
+        const next = new Set(prev)
+        next.delete(candidateId)
+        return next
+      })
+      toast.error(err.response?.data?.detail || 'Failed to send invite')
+    }
+  }
+
+  const handleAddCandidate = async (e) => {
+    e.preventDefault()
+    setAddingCandidate(true)
+    setAddCandidateError('')
+    try {
+      const fd = new FormData()
+      fd.append('name', addCandidateForm.name.trim())
+      fd.append('email', addCandidateForm.email.trim())
+      if (addCandidateForm.resume) fd.append('resume', addCandidateForm.resume)
+      await addCandidateManually(fd)
+      toast.success('Candidate added!')
+      setShowAddCandidate(false)
+      setAddCandidateForm({ name: '', email: '', resume: null })
+      getAllCandidates()
+        .then((r) => setCandidates(r.data?.data?.candidates || []))
+        .catch(() => {})
+    } catch (err) {
+      setAddCandidateError(err.response?.data?.detail || 'Failed to add candidate')
+    } finally {
+      setAddingCandidate(false)
+    }
+  }
+
   const canRunMatch = selectedIds.size > 0 && weightTotal === 100 && !!selectedJdId && !matching
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -951,6 +1049,109 @@ export default function DashboardPage() {
       {/* Resume Viewer Modal */}
       {resumeModal && (
         <ResumeViewerModal data={resumeModal} onClose={() => setResumeModal(null)} />
+      )}
+
+      {/* Resume slide-out panel (candidate pool / applications) */}
+      {(resumePanel || loadingResume) && (
+        <div className="fixed inset-0 z-[60] flex justify-end">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setResumePanel(null)} />
+          <div className="relative z-10 w-full max-w-xl bg-white h-full flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 flex-shrink-0">
+              <div>
+                <h2 className="text-base font-bold text-gray-900">📄 {resumePanel?.name || '…'}</h2>
+                <p className="text-xs text-gray-400 mt-0.5">{resumePanel?.email}</p>
+                {resumePanel?.headline && <p className="text-xs text-gray-500 mt-0.5">{resumePanel.headline}</p>}
+              </div>
+              <div className="flex items-center gap-2 ml-4">
+                {resumePanel?.resume_url && (
+                  <a href={resumePanel.resume_url} target="_blank" rel="noopener noreferrer"
+                    className="text-xs bg-teal-600 hover:bg-teal-700 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap">
+                    Open PDF ↗
+                  </a>
+                )}
+                <button onClick={() => setResumePanel(null)}
+                  className="text-gray-400 hover:text-gray-600 text-xl leading-none transition-colors flex-shrink-0">
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              {loadingResume ? (
+                <LoadingSpinner label="Loading resume…" />
+              ) : resumePanel?.resume_text ? (
+                <pre className="text-sm text-gray-700 whitespace-pre-wrap font-mono leading-relaxed bg-gray-50 rounded-xl p-4 border border-gray-100">
+                  {resumePanel.resume_text}
+                </pre>
+              ) : (
+                <div className="text-center py-12 text-gray-400">
+                  <p className="text-3xl mb-3">📄</p>
+                  <p className="text-sm">No resume text available for this candidate.</p>
+                  {resumePanel?.resume_url && (
+                    <a href={resumePanel.resume_url} target="_blank" rel="noopener noreferrer"
+                      className="mt-3 inline-block text-teal-600 hover:text-teal-700 text-sm font-medium underline">
+                      Open original file ↗
+                    </a>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Candidate manually modal */}
+      {showAddCandidate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-base font-bold text-gray-900">Add Candidate Manually</h2>
+              <button onClick={() => setShowAddCandidate(false)}
+                className="text-gray-400 hover:text-gray-600 text-xl leading-none transition-colors">✕</button>
+            </div>
+            <form onSubmit={handleAddCandidate} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Full Name <span className="text-red-500">*</span></label>
+                <input value={addCandidateForm.name}
+                  onChange={(e) => setAddCandidateForm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder="Jane Smith" required
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email <span className="text-red-500">*</span></label>
+                <input type="email" value={addCandidateForm.email}
+                  onChange={(e) => setAddCandidateForm((p) => ({ ...p, email: e.target.value }))}
+                  placeholder="jane@example.com" required
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Resume (PDF or DOCX)</label>
+                <input type="file" accept=".pdf,.docx"
+                  onChange={(e) => setAddCandidateForm((p) => ({ ...p, resume: e.target.files?.[0] || null }))}
+                  className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-teal-50 file:text-teal-700 hover:file:bg-teal-100 cursor-pointer" />
+              </div>
+              {addCandidateError && (
+                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{addCandidateError}</p>
+              )}
+              <div className="flex items-center justify-end gap-3 pt-1">
+                <button type="button" onClick={() => setShowAddCandidate(false)} disabled={addingCandidate}
+                  className="border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50">
+                  Cancel
+                </button>
+                <button type="submit"
+                  disabled={addingCandidate || !addCandidateForm.name.trim() || !addCandidateForm.email.trim()}
+                  className="bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium px-5 py-2 rounded-lg text-sm transition-colors flex items-center gap-2">
+                  {addingCandidate && (
+                    <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                  )}
+                  {addingCandidate ? 'Adding…' : 'Add Candidate'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       {/* New JD Modal */}
@@ -1119,7 +1320,18 @@ export default function DashboardPage() {
                       )}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
+                  <div className="flex items-center gap-2 flex-shrink-0 flex-wrap justify-end">
+                    <button
+                      onClick={() => handleVisibilityToggle(selectedJd.id, selectedJd.visibility)}
+                      title={selectedJd.visibility === 'open' ? 'Visible to candidates — click to make invite-only' : 'Invite-only — click to make public'}
+                      className={`text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors ${
+                        selectedJd.visibility === 'open'
+                          ? 'bg-green-50 border-green-300 text-green-700 hover:bg-green-100'
+                          : 'bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200'
+                      }`}
+                    >
+                      {selectedJd.visibility === 'open' ? '🌐 Public' : '🔒 Invite-only'}
+                    </button>
                     <button onClick={handleStartEdit}
                       className="border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-3 py-1.5 rounded-lg text-sm transition-colors">
                       Edit
@@ -1148,9 +1360,8 @@ export default function DashboardPage() {
 
                 {!screeningLink ? (
                   <div className="space-y-4">
-                    <div>
-                      <p className="text-sm font-medium text-gray-700 mb-2">Interview mode:</p>
-                      <ModeSelectorCards selectedMode={selectedMode} onSelect={setSelectedMode} />
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs bg-teal-100 text-teal-700 font-semibold px-2.5 py-0.5 rounded-full">🎙️ Speech interview</span>
                     </div>
                     <button onClick={handleCreateLink} disabled={creatingLink}
                       className="bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium px-4 py-2 rounded-lg text-sm transition-colors flex items-center gap-2">
@@ -1159,25 +1370,9 @@ export default function DashboardPage() {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs font-medium text-gray-500">Mode:</span>
-                      <span className="text-xs bg-teal-100 text-teal-700 font-semibold px-2.5 py-0.5 rounded-full">
-                        {INTERVIEW_MODES[screeningLink.interview_mode || 'text_only']?.icon}{' '}
-                        {INTERVIEW_MODES[screeningLink.interview_mode || 'text_only']?.label}
-                      </span>
-                      <button onClick={() => setShowModeSelector((v) => !v)} className="text-xs text-gray-400 hover:text-gray-600 underline transition-colors">
-                        {showModeSelector ? 'Cancel' : 'Change mode'}
-                      </button>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs bg-teal-100 text-teal-700 font-semibold px-2.5 py-0.5 rounded-full">🎙️ Speech interview</span>
                     </div>
-                    {showModeSelector && (
-                      <div className="space-y-3 p-3 bg-gray-50 rounded-xl border border-gray-200">
-                        <ModeSelectorCards selectedMode={selectedMode} onSelect={setSelectedMode} />
-                        <button onClick={handleCreateLink} disabled={creatingLink}
-                          className="bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm transition-colors flex items-center gap-2">
-                          {creatingLink ? <><svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" /></svg>Saving…</> : 'Save Mode'}
-                        </button>
-                      </div>
-                    )}
                     <p className="text-sm font-medium text-gray-700">Shareable link:</p>
                     <div className="flex items-center gap-2">
                       <div className="flex-1 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2 text-xs text-teal-700 font-mono truncate">
@@ -1195,7 +1390,15 @@ export default function DashboardPage() {
 
               {/* Candidate Matching */}
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
-                <h2 className="text-base font-semibold text-gray-900">Candidate Matching</h2>
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-semibold text-gray-900">Candidate Matching</h2>
+                  <button
+                    onClick={() => setShowAddCandidate(true)}
+                    className="text-xs bg-teal-600 hover:bg-teal-700 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    + Add Candidate
+                  </button>
+                </div>
                 {candidates.length === 0 ? (
                   <p className="text-sm text-gray-500">No candidates yet. Upload resumes from the Candidate Dashboard.</p>
                 ) : (
@@ -1257,6 +1460,120 @@ export default function DashboardPage() {
               </div>
             </div>
 
+            {/* ── Self-Applicants ────────────────────────────────────── */}
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold text-gray-900">
+                  Applications
+                  {applications.length > 0 && (
+                    <span className="ml-2 bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded-full">{applications.length}</span>
+                  )}
+                </h2>
+                <button onClick={() => loadApplications(selectedJdId)} disabled={loadingApplications}
+                  className="text-xs text-gray-400 hover:text-gray-600 underline transition-colors">
+                  {loadingApplications ? 'Refreshing…' : 'Refresh'}
+                </button>
+              </div>
+
+              {loadingApplications ? (
+                <LoadingSpinner size="sm" label="Loading applications…" />
+              ) : applications.length === 0 ? (
+                <div className="border border-dashed border-gray-200 rounded-xl p-8 text-center">
+                  <p className="text-2xl mb-2">📥</p>
+                  <p className="text-sm text-gray-500">No applications yet.</p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {selectedJd?.visibility === 'open'
+                      ? 'Candidates can apply via the job board.'
+                      : 'Make the JD public so candidates can self-apply.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-gray-100 text-left text-xs text-gray-400 font-semibold uppercase tracking-wide">
+                        <th className="pb-2 pr-3">Candidate</th>
+                        <th className="pb-2 pr-3">Status</th>
+                        <th className="pb-2 pr-3">Applied</th>
+                        <th className="pb-2 pr-3">Score</th>
+                        <th className="pb-2"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {applications.map((app) => {
+                        const cand = app.candidates || {}
+                        const statusColors = {
+                          applied:     'bg-blue-100 text-blue-700',
+                          shortlisted: 'bg-green-100 text-green-700',
+                          invited:     'bg-teal-100 text-teal-700',
+                          rejected:    'bg-red-100 text-red-700',
+                        }
+                        return (
+                          <tr key={app.id} className="hover:bg-gray-50 transition-colors">
+                            <td className="py-3 pr-3">
+                              <p className="font-medium text-gray-800">{cand.name || '—'}</p>
+                              <p className="text-xs text-gray-400">{cand.email}</p>
+                              {cand.headline && (
+                                <p className="text-xs text-gray-400 truncate max-w-[180px]">{cand.headline}</p>
+                              )}
+                            </td>
+                            <td className="py-3 pr-3">
+                              <select
+                                value={app.status}
+                                onChange={async (e) => {
+                                  const newStatus = e.target.value
+                                  try {
+                                    await updateApplicationStatus(app.id, newStatus)
+                                    setApplications((prev) =>
+                                      prev.map((a) => a.id === app.id ? { ...a, status: newStatus } : a)
+                                    )
+                                    toast.success('Status updated')
+                                  } catch {
+                                    toast.error('Failed to update status')
+                                  }
+                                }}
+                                className={`text-xs font-semibold px-2 py-1 rounded-full border-0 cursor-pointer focus:ring-2 focus:ring-teal-500 ${statusColors[app.status] || 'bg-gray-100 text-gray-600'}`}
+                              >
+                                <option value="applied">Applied</option>
+                                <option value="shortlisted">Shortlisted</option>
+                                <option value="invited">Invited</option>
+                                <option value="rejected">Rejected</option>
+                              </select>
+                            </td>
+                            <td className="py-3 pr-3 text-xs text-gray-400">
+                              {app.applied_at ? new Date(app.applied_at).toLocaleDateString() : '—'}
+                            </td>
+                            <td className="py-3 pr-3 text-xs text-gray-600 font-medium">
+                              {app.match_score != null ? `${Math.round(app.match_score)}%` : '—'}
+                            </td>
+                            <td className="py-3">
+                              <div className="flex items-center gap-2 whitespace-nowrap">
+                                {cand.id && (
+                                  <button onClick={() => handleViewResume(cand.id)}
+                                    className="text-xs text-blue-600 hover:text-blue-800 font-semibold underline transition-colors">
+                                    Resume
+                                  </button>
+                                )}
+                                {app.status !== 'invited' && cand.id && (
+                                  <>
+                                    <span className="text-gray-300">|</span>
+                                    <button onClick={() => handleInvite(cand.id, selectedJdId)}
+                                      className="text-xs text-teal-600 hover:text-teal-800 font-semibold underline transition-colors">
+                                      Invite
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
             {/* Match results */}
             {matchResults.length > 0 && (
               <div>
@@ -1275,6 +1592,9 @@ export default function DashboardPage() {
                         onViewResume={fullCand && (fullCand.resume_text || fullCand.resume_url)
                           ? () => openResume(fullCand.name, fullCand.email, fullCand.resume_text, fullCand.resume_url)
                           : null}
+                        onInvite={() => handleInvite(candidate.candidate_id, selectedJdId)}
+                        isInvited={invitedCandidateIds.has(candidate.candidate_id)}
+                        weightsUsed={candidate.weights_used || null}
                       />
                     )
                   })}
@@ -1318,7 +1638,6 @@ export default function DashboardPage() {
                         <th className="pb-2 pr-3">Candidate</th>
                         <th className="pb-2 pr-3">Score</th>
                         <th className="pb-2 pr-3">Grade</th>
-                        <th className="pb-2 pr-3">Mode</th>
                         <th className="pb-2 pr-3">Integrity</th>
                         <th className="pb-2 pr-3">Decision</th>
                         <th className="pb-2 pr-3">Recommendation</th>
@@ -1331,7 +1650,6 @@ export default function DashboardPage() {
                         const rec = HIRE_REC[r.hire_recommendation] || HIRE_REC.maybe
                         const gradeStyle = GRADE_STYLES[r.overall_grade] || GRADE_STYLES.F
                         const integrity = INTEGRITY_DOT[r.integrity_risk] || INTEGRITY_DOT.none
-                        const modeInfo = INTERVIEW_MODES[r.interview_mode || 'text_only']
                         return (
                           <tr key={r.session_id} className={`hover:bg-gray-50 transition-colors ${selectedSession === r.session_id ? 'bg-teal-50/50' : ''}`}>
                             <td className="py-3 pr-3">
@@ -1341,9 +1659,6 @@ export default function DashboardPage() {
                             <td className="py-3 pr-3 font-bold text-gray-800">{r.overall_score ?? '—'}/100</td>
                             <td className="py-3 pr-3">
                               <span className={`inline-block text-xs font-bold px-2 py-0.5 rounded ${gradeStyle}`}>{r.overall_grade ?? '—'}</span>
-                            </td>
-                            <td className="py-3 pr-3">
-                              <span className="text-xs text-gray-500 whitespace-nowrap">{modeInfo?.icon} {modeInfo?.label}</span>
                             </td>
                             <td className="py-3 pr-3">
                               <div className="group relative inline-flex items-center gap-1.5 cursor-default">

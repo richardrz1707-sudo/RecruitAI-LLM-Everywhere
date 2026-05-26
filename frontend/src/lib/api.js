@@ -3,6 +3,7 @@ import { useAuthStore } from './auth'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1',
+  withCredentials: true,
 })
 
 // Attach Bearer token from auth store to every request
@@ -77,11 +78,12 @@ export const duplicateJD = (jdId) =>
 export const parseJD = (jdId) =>
   api.post('/hiring-manager/parse-jd', { jd_id: jdId })
 
-export const matchCandidates = (jdId, candidateIds, weights) =>
+export const matchCandidates = (jdId, candidateIds, weights, forceRefresh = false) =>
   api.post('/hiring-manager/match-candidates', {
     jd_id: jdId,
     candidate_ids: candidateIds,
     weights,
+    force_refresh: forceRefresh,
   })
 
 export const getMatchResults = (jdId) =>
@@ -219,6 +221,9 @@ export const getMyApplications = () =>
 
 export const getMyInvites = () =>
   api.get('/candidates/my-invites')
+
+export const refreshMyInviteToken = (inviteId) =>
+  api.post(`/candidates/my-invites/${inviteId}/refresh-token`)
 
 // ── JD visibility ─────────────────────────────────────────────────────────
 

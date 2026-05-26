@@ -1,37 +1,74 @@
-import json
-import re
 from app.services.llm import call_claude
+from app.services.utils import (
+    truncate_resume, truncate_jd, truncate_answer,
+    get_cached_report, safe_json_parse,
+    MAX_TOKENS,
+)
 from app.database import supabase
 
-# Cost-saving truncation limits
-JD_MAX_CHARS = 1000      # truncate JD before any prompt
-RESUME_MAX_CHARS = 1500  # truncate resume before any prompt
-
 FALLBACK_QUESTIONS = [
-    {"id": 1, "question": "Please introduce yourself and summarise your relevant experience.", "dimension": "english_proficiency", "strong_answer_hint": "Clear structured intro with role-relevant highlights"},
-    {"id": 2, "question": "What specific skills and experience make you a strong fit for this role?", "dimension": "job_fit", "strong_answer_hint": "Concrete skills matched to role requirements with examples"},
-    {"id": 3, "question": "Describe a challenging situation at work and how you resolved it.", "dimension": "answer_quality", "strong_answer_hint": "STAR method — clear situation, specific actions, measurable result"},
-    {"id": 4, "question": "How would you approach the first 30 days in this role?", "dimension": "soft_skills", "strong_answer_hint": "Shows initiative, planning, stakeholder awareness"},
-    {"id": 5, "question": "Why are you interested in this specific role and company?", "dimension": "job_fit", "strong_answer_hint": "Genuine motivation, research shown, aligned goals"},
+    {
+        "id": 1,
+        "question": "Tell me about your most relevant experience for this role.",
+        "dimension": "english_proficiency",
+        "strong_answer_hint": "Specific structured intro referencing relevant experience",
+        "probes_skill": "communication",
+    },
+    {
+        "id": 2,
+        "question": "Walk me through a technical challenge you solved in a previous role.",
+        "dimension": "answer_quality",
+        "strong_answer_hint": "STAR method with measurable outcome",
+        "probes_skill": "technical depth",
+    },
+    {
+        "id": 3,
+        "question": "Describe a time you had to work through a conflict with a teammate.",
+        "dimension": "soft_skills",
+        "strong_answer_hint": "Shows empathy, resolution, self-awareness",
+        "probes_skill": "collaboration",
+    },
+    {
+        "id": 4,
+        "question": "What aspect of this role will require the most growth from you?",
+        "dimension": "soft_skills",
+        "strong_answer_hint": "Honest self-assessment with a growth plan",
+        "probes_skill": "self-awareness",
+    },
+    {
+        "id": 5,
+        "question": "Why this role and why now in your career?",
+        "dimension": "job_fit",
+        "strong_answer_hint": "Genuine motivation aligned with career direction",
+        "probes_skill": "motivation",
+    },
 ]
 
-_QUESTION_SYSTEM_PROMPT = """Generate exactly 5 interview screening questions for this job role.
+_QUESTION_SYSTEM_PROMPT = """Generate exactly 5 spoken interview questions tailored to both the job description and the candidate's resume.
+These are SPEECH interviews — questions must be natural to answer verbally, not in writing.
 
-Rules:
-- Q1: easy opener — background and experience summary
-- Q2: role-specific technical or skill question based on JD
-- Q3: behavioural question — a past challenge or achievement
-- Q4: situational question — how they would handle a scenario relevant to the role
-- Q5: motivation question — why this role, career goals
+Question structure (follow this order):
+- Q1: opener — reference a specific role or project from the candidate resume. Make it personal.
+- Q2: hard skill deep-dive — identify the most critical technical skill in the JD. Check the resume for evidence of it. If strong evidence exists, probe depth. If weak or missing, ask them to demonstrate or explain it.
+- Q3: soft skill probe — identify the most important soft skill the JD needs. Find evidence or absence in the resume and probe it directly with a behavioural question.
+- Q4: gap question — identify one clear gap between JD requirements and resume. Ask about it honestly and directly.
+- Q5: motivation and trajectory — connect their career story from the resume to this specific role.
 
-Each question must also have:
-- dimension: one of english_proficiency | answer_quality | soft_skills | job_fit
-- strong_answer_hint: what a good answer looks like (used for scoring only, not shown to candidate)
+For each question provide:
+- dimension: english_proficiency | answer_quality | soft_skills | job_fit
+- strong_answer_hint: what a strong spoken answer includes (for scoring, not shown to candidate)
+- probes_skill: the exact skill or trait being assessed (shown to recruiter in answer review)
 
 Return ONLY valid JSON, no markdown, no backticks:
 {
   "questions": [
-    {"id": 1, "question": "string", "dimension": "string", "strong_answer_hint": "string"}
+    {
+      "id": 1,
+      "question": "string",
+      "dimension": "string",
+      "strong_answer_hint": "string",
+      "probes_skill": "string"
+    }
   ]
 }"""
 
@@ -86,80 +123,99 @@ Return ONLY valid JSON, no markdown, no backticks.
 hire_recommendation guide: strong_yes>=80, yes>=65, maybe>=50, no<50"""
 
 
-def _extract_json(text: str) -> dict:
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        inner = lines[1:] if lines[0].startswith("```") else lines
-        if inner and inner[-1].strip() == "```":
-            inner = inner[:-1]
-        text = "\n".join(inner).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group())
-            except json.JSONDecodeError:
-                pass
-    return {}
-
-
-async def generate_questions(jd_text: str) -> list:
-    # Cost-saving: truncate JD to 1000 chars before sending to Claude
-    jd_trimmed = jd_text[:JD_MAX_CHARS]
-    messages = [{"role": "user", "content": f"Job description: {jd_trimmed}"}]
+async def generate_questions(jd_text: str, resume_text: str = "") -> list:
+    """
+    Generate 5 speech interview questions tailored to both the JD and the
+    candidate resume. JD truncated to JD_MAX_CHARS, resume to RESUME_MAX_CHARS.
+    """
+    resume_section = (
+        f"\nCandidate resume (truncated):\n{truncate_resume(resume_text)}"
+        if resume_text.strip()
+        else "\nNo resume provided — base questions on JD only."
+    )
+    user_message = (
+        f"Job description (truncated):\n{truncate_jd(jd_text)}"
+        f"{resume_section}"
+    )
+    messages = [{"role": "user", "content": user_message}]
     try:
         result = await call_claude(
             _QUESTION_SYSTEM_PROMPT, messages,
-            max_tokens=500, model="claude-haiku-4-5-20251001",
+            max_tokens=MAX_TOKENS["question_gen"], model="claude-haiku-4-5-20251001",
         )
-        parsed = _extract_json(result)
+        parsed = safe_json_parse(result, fallback={})
         questions = parsed.get("questions", [])
-        if len(questions) == 5:
+        if len(questions) == 5 and all("probes_skill" in q for q in questions):
             return questions
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[questions] Generation error: {e}")
     return FALLBACK_QUESTIONS
 
 
-async def get_or_create_questions(jd_id: str, jd_text: str) -> tuple:
-    # Cache key is jd_id only — all candidates on same JD share the same questions
-    print(f"[questions] Checking cache for jd_id={jd_id}")
-    cached = (
-        supabase.table("interview_questions")
-        .select("questions_json")
-        .eq("jd_id", jd_id)
-        .execute()
-    )
-    if cached.data:
-        print("[questions] Cache HIT — no Claude call needed")
-        return cached.data[0]["questions_json"], True
+async def get_or_create_questions(
+    jd_id: str,
+    jd_text: str,
+    candidate_id: str | None = None,
+    resume_text: str = "",
+) -> tuple:
+    """
+    Cache key is (candidate_id, jd_id) for resume-personalised questions.
+    candidate_id=None means generic questions for the JD (no resume provided).
+    """
+    print(f"[questions] Checking cache jd_id={jd_id} candidate_id={candidate_id}")
+    try:
+        if candidate_id:
+            cached = (
+                supabase.table("interview_questions")
+                .select("questions_json")
+                .eq("candidate_id", candidate_id)
+                .eq("jd_id", jd_id)
+                .limit(1)
+                .execute()
+            )
+        else:
+            cached = (
+                supabase.table("interview_questions")
+                .select("questions_json")
+                .eq("jd_id", jd_id)
+                .is_("candidate_id", "null")
+                .limit(1)
+                .execute()
+            )
+        if cached.data:
+            print("[questions] Cache HIT — no Claude call needed")
+            return cached.data[0]["questions_json"], True
+    except Exception as e:
+        print(f"[questions] Cache lookup error: {e}")
 
-    print("[questions] Cache MISS — generating questions with Claude")
-    questions = await generate_questions(jd_text)
-    supabase.table("interview_questions").insert(
-        {"jd_id": jd_id, "questions_json": questions}
-    ).execute()
+    print("[questions] Cache MISS — generating with Claude")
+    questions = await generate_questions(jd_text, resume_text)
+    try:
+        supabase.table("interview_questions").insert({
+            "jd_id": jd_id,
+            "candidate_id": candidate_id,
+            "questions_json": questions,
+        }).execute()
+    except Exception as e:
+        print(f"[questions] Cache save error: {e}")
     return questions, False
 
 
 async def evaluate_answer(question: dict, answer: str, is_followup: bool) -> dict:
-    # Cost-saving: send only current question + answer, not full history
     user_message = (
         f"Question: {question['question']}\n"
+        f"Probes skill: {question.get('probes_skill', 'general')}\n"
         f"Hint: {question.get('strong_answer_hint', '')}\n"
-        f"Answer: {answer}\n"
+        f"Answer: {truncate_answer(answer)}\n"
         f"Already a follow-up: {is_followup}"
     )
     messages = [{"role": "user", "content": user_message}]
     try:
         result = await call_claude(
             _EVAL_SYSTEM_PROMPT, messages,
-            max_tokens=350, model="claude-haiku-4-5-20251001",
+            max_tokens=MAX_TOKENS["answer_eval"], model="claude-haiku-4-5-20251001",
         )
-        parsed = _extract_json(result)
+        parsed = safe_json_parse(result, fallback={})
         if parsed and "scores" in parsed:
             return parsed
     except Exception:
@@ -173,9 +229,13 @@ async def evaluate_answer(question: dict, answer: str, is_followup: bool) -> dic
     }
 
 
-async def generate_report(scores_list: list, jd_title: str, aggregate_speech: dict | None = None) -> dict:
+async def generate_report(
+    scores_list: list,
+    jd_title: str,
+    aggregate_speech: dict | None = None,
+) -> dict:
     dims = ["english_proficiency", "answer_quality", "soft_skills", "job_fit"]
-    # Cost-saving: compute averages first, send only numbers to Claude
+    # Compute averages first — send only numbers to Claude (not raw transcripts)
     avg = {
         d: round(sum(s["scores"][d] for s in scores_list) / len(scores_list))
         for d in dims
@@ -212,9 +272,9 @@ async def generate_report(scores_list: list, jd_title: str, aggregate_speech: di
     try:
         result = await call_claude(
             _REPORT_SYSTEM_PROMPT, messages,
-            max_tokens=600, model="claude-haiku-4-5-20251001",
+            max_tokens=MAX_TOKENS["report_gen"], model="claude-haiku-4-5-20251001",
         )
-        parsed = _extract_json(result)
+        parsed = safe_json_parse(result, fallback={})
         if parsed and "overall_score" in parsed:
             return parsed
     except Exception:

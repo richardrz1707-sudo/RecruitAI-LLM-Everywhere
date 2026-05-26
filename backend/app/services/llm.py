@@ -7,7 +7,7 @@ _client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 async def call_claude(
     system_prompt: str,
     messages: list,
-    max_tokens: int = 800,
+    max_tokens: int = 400,
     model: str = "claude-haiku-4-5-20251001",
 ) -> str:
     try:

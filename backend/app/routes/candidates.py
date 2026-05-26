@@ -1,10 +1,16 @@
 import uuid
+import secrets
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from supabase import create_client
-from app.database import supabase, get_authed_client, get_current_user_id
+from app.database import supabase, get_authed_client, get_current_user_id, get_svc_client
 from app.config import settings
 from app.services.resume_parser import parse_resume
-from app.services.matching import score_candidate, calculate_weighted_score
+from app.services.matching import (
+    fallback_score_candidate,
+    parse_jd,
+    score_candidate,
+    calculate_weighted_score,
+)
 from app.services.utils import truncate_resume, get_cached_match_score
 from app.models.schemas import CreateApplicationRequest
 
@@ -251,7 +257,8 @@ async def apply_to_jd(
     candidate_id = candidate["id"]
     resume_text = request.resume_text or candidate.get("resume_text", "")
 
-    # Deduplicate: return existing application if any
+    # Deduplicate: return existing application if it already has a real score.
+    # Older failed runs may have stored 0; those should be recomputed.
     existing = (
         supabase.table("jd_applications")
         .select("id, status, match_score")
@@ -260,20 +267,31 @@ async def apply_to_jd(
         .limit(1)
         .execute()
     )
-    if existing.data:
+    existing_app = existing.data[0] if existing.data else None
+    if existing_app and (existing_app.get("match_score") or 0) > 0:
         return {
-            "application_id": existing.data[0]["id"],
-            "status": existing.data[0]["status"],
-            "match_score": existing.data[0]["match_score"],
+            "application_id": existing_app["id"],
+            "status": existing_app["status"],
+            "match_score": existing_app["match_score"],
             "message": "Already applied",
         }
+
+    if not resume_text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a resume with readable text before applying",
+        )
 
     # ── Compute match score (credit-saving: cache first) ──────────────────
     match_score = 0.0
     match_json: dict = {}
 
     cached = get_cached_match_score(candidate_id, request.jd_id)
-    if cached:
+    cached_score = cached.get("total_score", 0) if cached else 0
+    cached_json = cached.get("score_json", {}) if cached else {}
+    if cached and cached_score > 0 and "Unable to score" not in (
+        cached_json.get("overall_summary", "")
+    ):
         match_score = cached.get("total_score", 0.0)
         match_json = cached.get("score_json", {})
     else:
@@ -288,6 +306,11 @@ async def apply_to_jd(
             raise HTTPException(status_code=404, detail="Job description not found")
 
         parsed_jd = jd.data.get("parsed_json") or {}
+        if not parsed_jd:
+            parsed_jd = await parse_jd(jd.data.get("jd_text", ""))
+            if parsed_jd:
+                supabase.table("jd_posts").update({"parsed_json": parsed_jd}).eq("id", request.jd_id).execute()
+
         match_json = await score_candidate(
             resume_text=truncate_resume(resume_text),
             parsed_jd=parsed_jd,
@@ -296,6 +319,13 @@ async def apply_to_jd(
             jd_id=request.jd_id,
         )
         match_score = calculate_weighted_score(match_json)
+        if match_score <= 0 or "Unable to score" in match_json.get("overall_summary", ""):
+            match_json = fallback_score_candidate(
+                resume_text=truncate_resume(resume_text),
+                jd_text=jd.data.get("jd_text", ""),
+                parsed_jd=parsed_jd,
+            )
+            match_score = calculate_weighted_score(match_json)
 
         # Persist to match_scores so future calls are cache hits
         existing_score = (
@@ -307,34 +337,56 @@ async def apply_to_jd(
             .execute()
         )
         # Only cache a real score — never persist a failed/default result
-        if not existing_score.data and match_score > 0 and "Unable to score" not in (
+        if match_score > 0 and "Unable to score" not in (
             match_json.get("overall_summary", "")
         ):
-            supabase.table("match_scores").insert({
+            if existing_score.data:
+                supabase.table("match_scores").update({
+                    "score_json": match_json,
+                    "total_score": match_score,
+                }).eq("id", existing_score.data[0]["id"]).execute()
+            else:
+                supabase.table("match_scores").insert({
+                    "candidate_id": candidate_id,
+                    "jd_id": request.jd_id,
+                    "score_json": match_json,
+                    "total_score": match_score,
+                }).execute()
+
+    if match_score <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to calculate match score. Please make sure your resume text is readable.",
+        )
+
+    if existing_app:
+        result = (
+            supabase.table("jd_applications")
+            .update({
+                "cover_note": request.cover_note,
+                "match_score": match_score,
+            })
+            .eq("id", existing_app["id"])
+            .execute()
+        )
+    else:
+        result = (
+            supabase.table("jd_applications")
+            .insert({
                 "candidate_id": candidate_id,
                 "jd_id": request.jd_id,
-                "score_json": match_json,
-                "total_score": match_score,
-            }).execute()
-
-    # Create application record
-    result = (
-        supabase.table("jd_applications")
-        .insert({
-            "candidate_id": candidate_id,
-            "jd_id": request.jd_id,
-            "cover_note": request.cover_note,
-            "match_score": match_score,
-            "status": "applied",
-        })
-        .execute()
-    )
+                "cover_note": request.cover_note,
+                "match_score": match_score,
+                "status": "applied",
+            })
+            .execute()
+        )
 
     return {
         "application_id": result.data[0]["id"],
         "match_score": match_score,
-        "status": "applied",
-        "message": "Application submitted successfully",
+        "status": result.data[0].get("status", "applied"),
+        "message": "Application submitted successfully" if not existing_app else "Match score recalculated",
     }
 
 
@@ -365,28 +417,147 @@ async def get_my_applications(
 
 @router.get("/my-invites")
 async def get_my_invites(
+    client=Depends(get_authed_client),
     profile_id: str = Depends(get_current_user_id),
 ):
     """Candidate sees all screening invites sent by recruiters.
 
-    Searches by both profile_id and email so that invites created against
-    manually-added candidate records (no profile_id) are still visible once
-    the candidate registers and links an auth account.
-    """
-    # ── Collect candidate IDs with small, direct queries ─────────────────────
-    candidate_ids: set = set()
+    Three-stage candidate lookup:
+      1. candidates.profile_id = auth.uid()              (fast path)
+      2. candidates.email      = auth user email         (email fallback)
+      3. screening_invites.candidate_email = auth email  (last-resort — recruiter-added)
 
-    profile_row = (
-        supabase.table("profiles")
+    Auto-links profile_id on methods 2 & 3 so future calls use method 1.
+    Uses the authed client for the profiles lookup so JWT-based RLS allows
+    reading the caller's own profile even when no service-role key is set.
+    """
+    # ── Resolve email via authed PostgREST client (JWT → RLS allows own profile) ─
+    profile_row = client.table("profiles") \
+        .select("email") \
+        .eq("id", profile_id) \
+        .single() \
+        .execute()
+    user_email = ((profile_row.data or {}).get("email") or "").lower().strip()
+
+    print(f"DEBUG [my-invites] profile_id={profile_id!r}  user_email={user_email!r}")
+
+    # ── Method 1: profile_id direct match ────────────────────────────────────
+    candidate_id: str | None = None
+
+    by_profile = supabase.table("candidates") \
+        .select("id") \
+        .eq("profile_id", profile_id) \
+        .limit(1).execute()
+    print(f"DEBUG [my-invites] Method 1 (profile_id): {by_profile.data}")
+    if by_profile.data:
+        candidate_id = by_profile.data[0]["id"]
+
+    # ── Method 2: email fallback ─────────────────────────────────────────────
+    if not candidate_id and user_email:
+        by_email = supabase.table("candidates") \
+            .select("id, profile_id") \
+            .eq("email", user_email) \
+            .limit(1).execute()
+        print(f"DEBUG [my-invites] Method 2 (email): {by_email.data}")
+        if by_email.data:
+            candidate_id = by_email.data[0]["id"]
+            # Auto-link profile_id so the next call uses Method 1
+            if not by_email.data[0].get("profile_id"):
+                supabase.table("candidates") \
+                    .update({"profile_id": profile_id}) \
+                    .eq("id", candidate_id) \
+                    .execute()
+                print(f"DEBUG [my-invites] Auto-linked profile_id → candidate {candidate_id} (via email)")
+
+    # ── Method 3: look up candidate_id directly from screening_invites ───────
+    if not candidate_id and user_email:
+        inv_lookup = supabase.table("screening_invites") \
+            .select("candidate_id") \
+            .ilike("candidate_email", user_email) \
+            .limit(1).execute()
+        print(f"DEBUG [my-invites] Method 3 (invite.candidate_email): {inv_lookup.data}")
+        if inv_lookup.data:
+            candidate_id = inv_lookup.data[0]["candidate_id"]
+            # Auto-link so the next call uses Method 1
+            supabase.table("candidates") \
+                .update({"profile_id": profile_id}) \
+                .eq("id", candidate_id) \
+                .execute()
+            print(f"DEBUG [my-invites] Auto-linked profile_id → candidate {candidate_id} (via invite.candidate_email)")
+
+    if not candidate_id:
+        print(f"DEBUG [my-invites] No candidate record found for profile_id={profile_id!r} email={user_email!r}")
+        return {"invites": [], "debug": "no candidate record found"}
+
+    print(f"DEBUG [my-invites] Resolved candidate_id={candidate_id}")
+
+    # ── Fetch invites ─────────────────────────────────────────────────────────
+    invites_result = supabase.table("screening_invites") \
+        .select("id, candidate_id, jd_id, token, status, invited_at, started_at, completed_at") \
+        .eq("candidate_id", candidate_id) \
+        .neq("status", "expired") \
+        .order("invited_at", desc=True) \
+        .limit(50) \
+        .execute()
+    invites = invites_result.data or []
+    print(f"DEBUG [my-invites] Raw invites for candidate_id={candidate_id}: {len(invites)} rows")
+
+    if not invites:
+        return {"invites": [], "candidate_id": candidate_id}
+
+    # ── Enrich with JD + company data (separate lookup — jd_posts→profiles FK may not exist) ──
+    jd_ids = list({inv["jd_id"] for inv in invites if inv.get("jd_id")})
+    jd_map: dict = {}
+    if jd_ids:
+        jd_result = supabase.table("jd_posts") \
+            .select("id, title, department, location, recruiter_id") \
+            .in_("id", jd_ids) \
+            .execute()
+        jds = jd_result.data or []
+
+        recruiter_ids = list({j["recruiter_id"] for j in jds if j.get("recruiter_id")})
+        profile_map: dict = {}
+        if recruiter_ids:
+            try:
+                profiles_resp = supabase.table("profiles") \
+                    .select("id, company_name") \
+                    .in_("id", recruiter_ids) \
+                    .execute()
+                profile_map = {
+                    p["id"]: p.get("company_name", "")
+                    for p in (profiles_resp.data or [])
+                }
+            except Exception:
+                pass
+
+        for jd in jds:
+            jd["company_name"] = profile_map.get(jd.get("recruiter_id", ""), "")
+            jd_map[jd["id"]] = jd
+
+    for inv in invites:
+        inv["jd_posts"] = jd_map.get(inv.get("jd_id"), {})
+
+    return {"invites": invites, "candidate_id": candidate_id}
+
+
+@router.post("/my-invites/{invite_id}/refresh-token")
+async def refresh_my_invite_token(
+    invite_id: str,
+    profile_id: str = Depends(get_current_user_id),
+):
+    db = supabase
+    candidate_ids: set = set()
+    profile = (
+        db.table("profiles")
         .select("email")
         .eq("id", profile_id)
         .single()
         .execute()
     )
-    email = ((profile_row.data or {}).get("email") or "").lower().strip()
+    email = ((profile.data or {}).get("email") or "").lower().strip()
 
     by_profile = (
-        supabase.table("candidates")
+        db.table("candidates")
         .select("id")
         .eq("profile_id", profile_id)
         .execute()
@@ -396,7 +567,7 @@ async def get_my_invites(
 
     if email:
         by_email = (
-            supabase.table("candidates")
+            db.table("candidates")
             .select("id")
             .eq("email", email)
             .execute()
@@ -405,35 +576,31 @@ async def get_my_invites(
             candidate_ids.add(candidate["id"])
 
     if not candidate_ids:
-        return {"invites": []}
+        raise HTTPException(status_code=404, detail="Invite not found")
 
-    invites_result = (
-        supabase.table("screening_invites")
-        .select("id, candidate_id, jd_id, token, status, invited_at, started_at, completed_at, expires_at")
+    invite = (
+        db.table("screening_invites")
+        .select("id, candidate_id, status")
+        .eq("id", invite_id)
         .in_("candidate_id", list(candidate_ids))
-        .order("invited_at", desc=True)
-        .limit(50)
+        .limit(1)
         .execute()
     )
-    invites = invites_result.data or []
-    if not invites:
-        return {"invites": []}
+    if not invite.data:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    if invite.data[0].get("status") == "completed":
+        raise HTTPException(status_code=409, detail="Screening already completed")
 
-    jd_ids = list({invite["jd_id"] for invite in invites if invite.get("jd_id")})
-    jd_map = {}
-    if jd_ids:
-        jd_result = (
-            supabase.table("jd_posts")
-            .select("id, title, department, location")
-            .in_("id", jd_ids)
-            .execute()
-        )
-        jd_map = {jd["id"]: jd for jd in jd_result.data or []}
-
-    for invite in invites:
-        invite["jd_posts"] = jd_map.get(invite.get("jd_id"), {})
-
-    return {"invites": invites}
+    token = secrets.token_urlsafe(16)
+    updated = (
+        db.table("screening_invites")
+        .update({"token": token, "status": "pending"})
+        .eq("id", invite_id)
+        .execute()
+    )
+    if not updated.data:
+        raise HTTPException(status_code=500, detail="Failed to refresh invite")
+    return {"token": token, "screening_url": f"/screen/{token}", "status": "pending"}
 
 
 @router.get("/upload-history")
