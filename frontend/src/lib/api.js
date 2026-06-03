@@ -65,6 +65,28 @@ export const createJD = (data) => api.post('/hiring-manager/create-jd', data)
 export const getDashboardSummary = () =>
   api.get('/hiring-manager/dashboard-summary')
 
+export const bulkDecision = (sessionIds, decision, reason = '') =>
+  api.post('/hiring-manager/bulk-decision', {
+    session_ids: sessionIds,
+    decision,
+    reason,
+  })
+
+export const bulkInvite = (candidateIds, jdId) =>
+  api.post('/hiring-manager/bulk-invite', {
+    candidate_ids: candidateIds,
+    jd_id: jdId,
+  })
+
+export const getBiasCheck = (jdId) =>
+  api.get(`/hiring-manager/bias-check/${jdId}`)
+
+export const getHiringPipeline = () =>
+  api.get('/hiring-manager/pipeline')
+
+export const getQuestionEffectiveness = (jdId) =>
+  api.get(`/hiring-manager/question-effectiveness/${jdId}`)
+
 /** Auth-required — returns recruiter's own JDs with screening_count */
 export const getJDPosts = (status = 'active') =>
   api.get(`/hiring-manager/jd-posts?status=${status}`)
@@ -204,9 +226,6 @@ export const addCandidateManually = (formData) =>
 export const getCandidateProfile = () =>
   api.get('/candidates/profile')
 
-export const updateCandidateProfile = (updates) =>
-  api.patch('/candidates/profile', updates)
-
 export const uploadMyResume = (formData) =>
   api.post('/candidates/profile/resume', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -246,5 +265,30 @@ export const refreshMyInviteToken = (inviteId) =>
 
 export const updateJdVisibility = (jdId, visibility) =>
   api.patch('/hiring-manager/jd/visibility', { jd_id: jdId, visibility })
+
+// ── Chat agent ───────────────────────────────────────────────────
+export const sendChatMessage = (message, conversationId = "") =>
+  api.post("/chat/message", { message, conversation_id: conversationId })
+
+export const getChatHistory = (conversationId) =>
+  api.get(`/chat/history/${conversationId}`)
+
+export const clearChatHistory = (conversationId) =>
+  api.delete(`/chat/history/${conversationId}`)
+
+export const getSafetyStats = () =>
+  api.get('/chat/safety-stats')
+
+export const getDecisionLog = (conversationId) =>
+  api.get(`/chat/decision-log/${conversationId}`)
+
+export const getSecurityLog = () =>
+  api.get('/chat/security-log')
+
+export const getConversations = () =>
+  api.get('/chat/conversations')
+
+export const sendCandidateChatMessage = (message, conversationId = '') =>
+  api.post('/chat/candidate-message', { message, conversation_id: conversationId })
 
 export default api

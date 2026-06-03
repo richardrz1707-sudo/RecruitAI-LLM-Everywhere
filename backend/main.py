@@ -7,6 +7,7 @@ from app.routes.auth import router as auth_router
 from app.routes.invites import router as invites_router
 from app.routes.applications import router as applications_router
 from app.routes.feedback import router as feedback_router
+from app.routes.chat import router as chat_router
 
 app = FastAPI(title="Recruitment Platform API")
 
@@ -36,7 +37,4 @@ app.include_router(screening_router, prefix="/api/v1", tags=["screening"])
 app.include_router(invites_router, prefix="/api/v1", tags=["invites"])
 app.include_router(applications_router, prefix="/api/v1", tags=["applications"])
 app.include_router(feedback_router, prefix="/api/v1", tags=["feedback"])
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+app.include_router(chat_router, prefix="/api/v1", tags=["chat"])

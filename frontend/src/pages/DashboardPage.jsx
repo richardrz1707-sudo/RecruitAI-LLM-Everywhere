@@ -8,11 +8,16 @@ import {
   createInvite, getApplicationsForJd, updateApplicationStatus,
   getCandidateResume, addCandidateManually, updateJdVisibility,
   previewInviteQuestions, saveInviteQuestions, getDashboardSummary,
+  bulkDecision,
+  getBiasCheck,
+  getHiringPipeline,
+  getQuestionEffectiveness,
 } from '../lib/api'
 import { useAuthStore } from '../lib/auth'
 import { toast } from '../components/Toast'
 import LoadingSpinner from '../components/LoadingSpinner'
 import CandidateScoreCard from '../components/CandidateScoreCard'
+import ChatAgent from '../components/ChatAgent'
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -109,7 +114,7 @@ function MiniScoreBar({ label, score }) {
 
 function ResumeViewerModal({ data, onClose }) {
   if (!data) return null
-  const { name, email, resume_text, resume_url, linkedin_url } = data
+  const { name, email, resume_text, resume_url } = data
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
@@ -120,16 +125,6 @@ function ResumeViewerModal({ data, onClose }) {
           <div>
             <h2 className="text-base font-bold text-gray-900">📄 {name}</h2>
             <p className="text-xs text-gray-400 mt-0.5">{email}</p>
-            {linkedin_url && (
-              <a
-                href={linkedin_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-teal-600 hover:text-teal-800 underline"
-              >
-                LinkedIn profile
-              </a>
-            )}
           </div>
           <div className="flex items-center gap-2 ml-4">
             {resume_url && (
@@ -677,7 +672,6 @@ function InsightsSummaryCard({ refreshKey }) {
   }
 
   const safeSummary = summary || fallbackSummary
-
   const stats = [
     { value: safeSummary.active_jds, label: 'Active JDs', icon: 'JD', color: 'text-teal-700', bg: 'bg-teal-50' },
     { value: safeSummary.candidates_screened, label: 'Total screened', icon: 'CS', color: 'text-blue-700', bg: 'bg-blue-50' },
@@ -727,6 +721,303 @@ function InsightsSummaryCard({ refreshKey }) {
   )
 }
 
+function BiasCheckBanner({ jdId, refreshKey }) {
+  const [bias, setBias] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
+
+  useEffect(() => {
+    if (!jdId) return
+    let cancelled = false
+    setLoading(true)
+    setDismissed(false)
+    getBiasCheck(jdId)
+      .then((res) => {
+        if (!cancelled) setBias(res.data)
+      })
+      .catch(() => {
+        if (!cancelled) setBias(null)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [jdId, refreshKey])
+
+  if (loading || !bias || dismissed) return null
+
+  if (!bias.bias_detected) {
+    return (
+      <div className="flex items-center gap-2 bg-teal-50 border border-teal-200 rounded-xl px-4 py-2.5">
+        <span className="text-sm">OK</span>
+        <p className="text-xs text-teal-700 flex-1">
+          <strong>Diverse shortlist:</strong>{' '}
+          {bias.diverse_signal || 'Your shortlist shows good diversity.'}
+        </p>
+        <button
+          onClick={() => setDismissed(true)}
+          className="text-teal-500 hover:text-teal-700 text-xs"
+        >
+          x
+        </button>
+      </div>
+    )
+  }
+
+  const severityColors = {
+    low: 'bg-blue-50 border-blue-200 text-blue-700',
+    medium: 'bg-amber-50 border-amber-200 text-amber-700',
+    high: 'bg-red-50 border-red-200 text-red-700',
+  }
+  const colors = severityColors[bias.severity] || severityColors.low
+
+  return (
+    <div className={`border rounded-xl px-4 py-3 ${colors}`}>
+      <div className="flex items-start justify-between">
+        <div className="flex items-start gap-2 flex-1">
+          <span className="text-sm mt-0.5">!</span>
+          <div>
+            <p className="text-xs font-medium mb-1">Diversity notice</p>
+            {(bias.patterns || []).map((pattern, index) => (
+              <p key={index} className="text-xs mb-0.5">
+                - {pattern}
+              </p>
+            ))}
+            {bias.suggestion && (
+              <p className="text-xs mt-1.5 font-medium">
+                Suggestion: {bias.suggestion}
+              </p>
+            )}
+          </div>
+        </div>
+        <button
+          onClick={() => setDismissed(true)}
+          className="text-xs opacity-60 hover:opacity-100 ml-2"
+        >
+          x
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function QuestionEffectivenessPanel({ jdId }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+
+  const load = () => {
+    if (!jdId || data || loading) return
+    setLoading(true)
+    getQuestionEffectiveness(jdId)
+      .then((res) => setData(res.data))
+      .catch(() => setData(null))
+      .finally(() => setLoading(false))
+  }
+
+  const signalColors = {
+    high: 'text-teal-700 bg-teal-50 border-teal-200',
+    medium: 'text-amber-700 bg-amber-50 border-amber-200',
+    low: 'text-red-700 bg-red-50 border-red-200',
+  }
+
+  const actionColors = {
+    keep: 'text-teal-700 bg-teal-50',
+    improve: 'text-amber-700 bg-amber-50',
+    replace: 'text-red-700 bg-red-50',
+  }
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+      <button
+        onClick={() => {
+          const nextExpanded = !expanded
+          setExpanded(nextExpanded)
+          if (nextExpanded) load()
+        }}
+        className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-gray-50 transition-colors text-left"
+      >
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex h-7 min-w-7 items-center justify-center rounded-md bg-teal-50 px-1.5 text-[10px] font-bold text-teal-700">
+              QE
+            </span>
+            <h2 className="text-base font-semibold text-gray-900">
+              Question effectiveness
+            </h2>
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            See which interview questions gave the strongest candidate signal.
+          </p>
+        </div>
+        <span className="text-xs font-semibold text-gray-500 whitespace-nowrap">
+          {expanded ? 'Hide' : 'Analyse'}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-gray-100 px-5 pb-5 pt-4">
+          {loading ? (
+            <div className="py-4 text-center">
+              <div className="w-5 h-5 border-2 border-teal-600 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+              <p className="text-xs text-gray-400">
+                Analysing question effectiveness...
+              </p>
+            </div>
+          ) : !data || !data.enough_data ? (
+            <div className="border border-dashed border-gray-200 rounded-xl p-5 text-center">
+              <p className="text-sm font-medium text-gray-600">
+                Need 3+ completed sessions
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                {data?.message || 'Not enough data yet.'}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs text-gray-500">
+                  Based on {data.total_sessions} completed screenings.
+                </p>
+              </div>
+
+              {data.ai_insights?.overall_recommendation && (
+                <div className="bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
+                  <p className="text-xs text-teal-700">
+                    {data.ai_insights.overall_recommendation}
+                  </p>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {(data.questions || []).map((q, index) => {
+                  const insight = (data.ai_insights?.insights || []).find(
+                    (item) => String(item.question_id) === String(q.question_id),
+                  )
+                  const questionText = q.question_text || `Question ${q.question_id}`
+                  return (
+                    <div key={`${q.question_id}-${index}`} className="border border-gray-100 rounded-lg p-3">
+                      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                        <p className="text-xs text-gray-700 leading-relaxed flex-1">
+                          <span className="font-semibold">Q{q.question_id}:</span>{' '}
+                          {questionText.length > 110
+                            ? `${questionText.substring(0, 110)}...`
+                            : questionText}
+                        </p>
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${signalColors[q.signal] || signalColors.medium}`}>
+                            {q.signal} signal
+                          </span>
+                          {insight?.action && (
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${actionColors[insight.action] || 'text-gray-600 bg-gray-50'}`}>
+                              {insight.action}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {insight?.insight && (
+                        <p className="text-xs text-gray-500 italic mt-2">
+                          {insight.insight}
+                        </p>
+                      )}
+
+                      <div className="flex flex-wrap gap-3 mt-2">
+                        <span className="text-xs text-gray-400">Avg: {q.avg_score}/100</span>
+                        <span className="text-xs text-gray-400">Variance: {q.variance}</span>
+                        <span className="text-xs text-gray-400">{q.responses} responses</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function KanbanBoard({ stages, loading }) {
+  const columns = [
+    { key: 'applied', label: 'Applied', tag: 'AP', color: 'bg-gray-50 border-gray-200', headerColor: 'bg-gray-100 text-gray-700' },
+    { key: 'screened', label: 'Screened', tag: 'SC', color: 'bg-blue-50 border-blue-200', headerColor: 'bg-blue-100 text-blue-700' },
+    { key: 'shortlisted', label: 'Shortlisted', tag: 'SL', color: 'bg-amber-50 border-amber-200', headerColor: 'bg-amber-100 text-amber-700' },
+    { key: 'advanced', label: 'Advanced', tag: 'AD', color: 'bg-teal-50 border-teal-200', headerColor: 'bg-teal-100 text-teal-700' },
+    { key: 'rejected', label: 'Not selected', tag: 'NS', color: 'bg-red-50 border-red-200', headerColor: 'bg-red-100 text-red-700' },
+  ]
+
+  if (loading) {
+    return (
+      <div className="flex gap-3 overflow-x-auto pb-4">
+        {columns.map((column) => (
+          <div key={column.key} className="flex-shrink-0 w-60 bg-gray-50 rounded-xl h-72 animate-pulse" />
+        ))}
+      </div>
+    )
+  }
+
+  if (!stages) {
+    return (
+      <div className="text-center py-8 text-gray-400 text-sm">
+        Could not load pipeline
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex gap-3 overflow-x-auto pb-4">
+      {columns.map((column) => {
+        const cards = stages[column.key] || []
+        return (
+          <div key={column.key} className={`flex-shrink-0 w-60 border rounded-xl overflow-hidden ${column.color}`}>
+            <div className={`px-3 py-2 ${column.headerColor} flex items-center justify-between`}>
+              <span className="text-xs font-medium">
+                {column.tag} {column.label}
+              </span>
+              <span className="text-xs bg-white/70 px-1.5 py-0.5 rounded-full font-medium">
+                {cards.length}
+              </span>
+            </div>
+
+            <div className="p-2 space-y-2 max-h-[28rem] overflow-y-auto">
+              {cards.length === 0 ? (
+                <p className="text-xs text-gray-400 text-center py-4">No candidates</p>
+              ) : (
+                cards.map((card) => (
+                  <div key={card.id} className="bg-white rounded-lg p-3 border border-white shadow-sm hover:shadow-md transition-shadow">
+                    <p className="text-xs font-medium text-gray-800 truncate">{card.name}</p>
+                    <p className="text-xs text-gray-400 truncate mb-1.5">{card.jd_title}</p>
+                    {card.score > 0 && (
+                      <div className="flex items-center justify-between">
+                        <span className={`text-xs font-medium ${
+                          card.score >= 80 ? 'text-teal-600' : card.score >= 60 ? 'text-amber-600' : 'text-red-500'
+                        }`}>
+                          {Math.round(card.score)}%
+                        </span>
+                        {card.grade && (
+                          <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
+                            {card.grade}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    <p className="text-xs text-gray-300 mt-1">{card.date}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function DashboardPage() {
   const navigate = useNavigate()
   const { fullName, clearUser } = useAuthStore()
@@ -737,6 +1028,9 @@ export default function DashboardPage() {
   const [selectedJdId, setSelectedJdId]   = useState(null)
   const [showNewJdModal, setShowNewJdModal] = useState(false)
   const [showArchivedJds, setShowArchivedJds] = useState(false)
+  const [pipelineView, setPipelineView] = useState(true)
+  const [pipeline, setPipeline] = useState(null)
+  const [pipelineLoading, setPipelineLoading] = useState(false)
 
   // JD editing
   const [isEditing, setIsEditing]   = useState(false)
@@ -759,6 +1053,8 @@ export default function DashboardPage() {
   // Screening results
   const [screeningResults, setScreeningResults] = useState([])
   const [loadingResults, setLoadingResults]     = useState(false)
+  const [selectedSessions, setSelectedSessions] = useState([])
+  const [bulkLoading, setBulkLoading]           = useState(false)
 
   // Full report panel
   const [selectedSession, setSelectedSession]     = useState(null)
@@ -772,9 +1068,9 @@ export default function DashboardPage() {
   const [loadingReview, setLoadingReview] = useState(false)
 
   // Resume viewer modal
-  const [resumeModal, setResumeModal] = useState(null) // null | { name, email, resume_text, resume_url, linkedin_url }
-  const openResume = (name, email, resume_text, resume_url = '', linkedin_url = '') =>
-    setResumeModal({ name, email, resume_text: resume_text || '', resume_url: resume_url || '', linkedin_url: linkedin_url || '' })
+  const [resumeModal, setResumeModal] = useState(null) // null | { name, email, resume_text, resume_url }
+  const openResume = (name, email, resume_text, resume_url = '') =>
+    setResumeModal({ name, email, resume_text: resume_text || '', resume_url: resume_url || '' })
 
   // Applications (self-applicants per JD)
   const [applications, setApplications]           = useState([])
@@ -809,19 +1105,21 @@ export default function DashboardPage() {
     applications
       .map((app) => {
         const cand = app.candidates || {}
+        const pooledCandidate = candidates.find((c) => c.id === cand.id) || {}
         if (!cand.id) return null
         return {
           ...cand,
+          linkedin_url: cand.linkedin_url || pooledCandidate.linkedin_url || '',
+          headline: cand.headline || pooledCandidate.headline || '',
           resume_text: app.resume_text || cand.resume_text || '',
           resume_filename: app.resume_filename || cand.resume_filename || '',
           application_id: app.id,
           application_status: app.status,
           match_score: app.match_score,
-          linkedin_url: cand.linkedin_url || '',
         }
       })
       .filter(Boolean)
-  ), [applications])
+  ), [applications, candidates])
 
   // ── Load JD list + candidates on mount ───────────────────────────────
   useEffect(() => {
@@ -841,6 +1139,7 @@ export default function DashboardPage() {
       setSessionDetail(null)
       setApplications([])
       setSelectedIds(new Set())
+      setSelectedSessions([])
       return
     }
     setIsEditing(false)
@@ -850,6 +1149,7 @@ export default function DashboardPage() {
     setSelectedSession(null)
     setSessionDetail(null)
     setSelectedIds(new Set())
+    setSelectedSessions([])
 
     getScreeningLink(selectedJdId)
       .then((r) => {
@@ -865,12 +1165,23 @@ export default function DashboardPage() {
     loadApplications(selectedJdId)
   }, [selectedJdId]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (!selectedJdId && !pipeline && !pipelineLoading) {
+      loadPipeline()
+    }
+  }, [selectedJdId, pipeline, pipelineLoading]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const loadJdList = async () => {
     setLoadingJds(true)
     try {
+      console.log('[DashboardPage] Fetching JDs...')
       const r = await getJDPosts('all')
+      console.log('[DashboardPage] JDs fetched:', r.data)
       setJdList(r.data?.data?.jd_posts || [])
-    } catch {
+    } catch (err) {
+      console.error('[DashboardPage] JD fetch error:', err)
+      console.error('[DashboardPage] Status:', err.response?.status)
+      console.error('[DashboardPage] Message:', err.response?.data)
       toast.error('Failed to load job descriptions')
     } finally {
       setLoadingJds(false)
@@ -879,10 +1190,19 @@ export default function DashboardPage() {
 
   const loadScreeningResults = (jdId) => {
     setLoadingResults(true)
+    setSelectedSessions([])
     getScreeningResults(jdId)
       .then((r) => setScreeningResults(r.data?.results || []))
       .catch(() => {})
       .finally(() => setLoadingResults(false))
+  }
+
+  const loadPipeline = () => {
+    setPipelineLoading(true)
+    getHiringPipeline()
+      .then((r) => setPipeline(r.data?.stages || null))
+      .catch(() => setPipeline(null))
+      .finally(() => setPipelineLoading(false))
   }
 
   // ── JD CRUD ───────────────────────────────────────────────────────────
@@ -1061,6 +1381,43 @@ export default function DashboardPage() {
   }
 
   // ── Applications ──────────────────────────────────────────────────────────
+  const handleBulkDecision = async (sessionIds, decision, successMessage) => {
+    const ids = sessionIds || selectedSessions
+    if (!ids.length) return
+    setBulkLoading(true)
+    const previousResults = screeningResults
+    setScreeningResults((prev) =>
+      prev.map((r) => ids.includes(r.session_id) ? { ...r, recruiter_decision: decision } : r)
+    )
+    try {
+      await bulkDecision(ids, decision)
+      setSelectedSessions([])
+      toast.success(successMessage || `${ids.length} candidates marked as ${decision}`)
+    } catch {
+      setScreeningResults(previousResults)
+      toast.error('Bulk action failed')
+    } finally {
+      setBulkLoading(false)
+    }
+  }
+
+  const handleAdvanceTop3 = () => {
+    const top3 = screeningResults.slice(0, 3).map((r) => r.session_id)
+    handleBulkDecision(top3, 'advance', 'Top 3 candidates advanced')
+  }
+
+  const handleRejectBelow60 = () => {
+    const below60 = screeningResults
+      .filter((r) => (r.overall_score || 0) < 60)
+      .map((r) => r.session_id)
+
+    if (!below60.length) {
+      toast.success('No candidates below 60%')
+      return
+    }
+    handleBulkDecision(below60, 'reject', `${below60.length} candidates rejected`)
+  }
+
   const loadApplications = (jdId) => {
     setLoadingApplications(true)
     getApplicationsForJd(jdId)
@@ -1093,7 +1450,12 @@ export default function DashboardPage() {
     setResumePanel(null)
     try {
       const r = await getCandidateResume(candidateId)
-      setResumePanel(r.data)
+      const linkedCandidate = candidates.find((c) => c.id === candidateId) || {}
+      setResumePanel({
+        ...r.data,
+        linkedin_url: r.data?.linkedin_url || linkedCandidate.linkedin_url || '',
+        headline: r.data?.headline || linkedCandidate.headline || '',
+      })
     } catch {
       toast.error('Failed to load resume')
     } finally {
@@ -1317,12 +1679,6 @@ export default function DashboardPage() {
                 <h2 className="text-base font-bold text-gray-900">📄 {resumePanel?.name || '…'}</h2>
                 <p className="text-xs text-gray-400 mt-0.5">{resumePanel?.email}</p>
                 {resumePanel?.headline && <p className="text-xs text-gray-500 mt-0.5">{resumePanel.headline}</p>}
-                {resumePanel?.linkedin_url && (
-                  <a href={resumePanel.linkedin_url} target="_blank" rel="noopener noreferrer"
-                    className="text-xs text-teal-600 hover:text-teal-800 underline">
-                    LinkedIn profile
-                  </a>
-                )}
               </div>
               <div className="flex items-center gap-2 ml-4">
                 {resumePanel?.resume_url && (
@@ -1338,6 +1694,31 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="flex-1 overflow-y-auto p-5">
+              {resumePanel?.linkedin_url && (
+                <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 mb-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-4 h-4 text-blue-600" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                      </svg>
+                      <span className="text-sm font-medium text-blue-700">
+                        LinkedIn Profile
+                      </span>
+                    </div>
+                    <a
+                      href={resumePanel.linkedin_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg transition-colors font-medium"
+                    >
+                      Open LinkedIn →
+                    </a>
+                  </div>
+                  <p className="text-xs text-blue-500 mt-1 truncate">
+                    {resumePanel.linkedin_url}
+                  </p>
+                </div>
+              )}
               {loadingResume ? (
                 <LoadingSpinner label="Loading resume…" />
               ) : resumePanel?.resume_text ? (
@@ -1425,10 +1806,7 @@ export default function DashboardPage() {
       <aside className="w-[268px] flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
         {/* Sidebar header */}
         <div className="flex-shrink-0 px-4 py-3.5 border-b border-gray-100 flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Recruiter Dashboard</p>
-            <h2 className="text-sm font-semibold text-gray-800 truncate">My Job Descriptions</h2>
-          </div>
+          <h2 className="text-sm font-semibold text-gray-800 truncate">My Job Descriptions</h2>
           <button
             onClick={() => setShowNewJdModal(true)}
             className="flex-shrink-0 bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap"
@@ -1449,6 +1827,26 @@ export default function DashboardPage() {
           </button>
         </div>
 
+        <div className="flex-shrink-0 px-4 py-3 border-b border-gray-100">
+          <button
+            onClick={() => {
+              setSelectedJdId(null)
+              setPipelineView(true)
+              setSelectedSession(null)
+              setSessionDetail(null)
+              setReviewSession(null)
+              setReviewDetail(null)
+            }}
+            className={`w-full text-left text-xs font-semibold px-3 py-2 rounded-lg transition-colors ${
+              !selectedJd
+                ? 'bg-teal-50 text-teal-700 border border-teal-100'
+                : 'text-gray-600 hover:bg-gray-50 border border-transparent'
+            }`}
+          >
+            Dashboard home
+          </button>
+        </div>
+
         {/* JD list */}
         <div className="flex-1 overflow-y-auto py-1">
           {loadingJds ? (
@@ -1466,7 +1864,9 @@ export default function DashboardPage() {
                       key={jd.id}
                       jd={jd}
                       selected={selectedJdId === jd.id}
-                      onClick={() => setSelectedJdId(jd.id)}
+                      onClick={() => {
+                        setSelectedJdId(jd.id)
+                      }}
                     />
                   ))}
                 </>
@@ -1498,7 +1898,9 @@ export default function DashboardPage() {
                       key={jd.id}
                       jd={jd}
                       selected={selectedJdId === jd.id}
-                      onClick={() => setSelectedJdId(jd.id)}
+                      onClick={() => {
+                        setSelectedJdId(jd.id)
+                      }}
                     />
                   ))}
                 </div>
@@ -1514,7 +1916,38 @@ export default function DashboardPage() {
           <InsightsSummaryCard refreshKey={`${activeJds.length}-${screeningResults.length}`} />
         </div>
 
+        {!selectedJd && (
+        <div className="hidden">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPipelineView(false)}
+              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                !pipelineView ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              List view
+            </button>
+            <button
+              onClick={() => {
+                setPipelineView(true)
+                if (!pipeline) loadPipeline()
+              }}
+              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                pipelineView ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              Pipeline view
+            </button>
+          </div>
+        </div>
+        )}
+
         {!selectedJd ? (
+          pipelineView ? (
+          <div className="p-6 max-w-7xl mx-auto">
+            <KanbanBoard stages={pipeline} loading={pipelineLoading} />
+          </div>
+        ) : (
           /* Empty state */
           <div className="flex flex-col items-center justify-center h-full text-center p-8">
             <p className="text-5xl mb-4">🎯</p>
@@ -1529,6 +1962,7 @@ export default function DashboardPage() {
               + Create your first JD
             </button>
           </div>
+          )
         ) : (
           <div className="p-6 space-y-6 max-w-5xl mx-auto">
 
@@ -1690,7 +2124,7 @@ export default function DashboardPage() {
                           {(c.resume_text || c.resume_url) && (
                             <button
                               type="button"
-                              onClick={(e) => { e.preventDefault(); openResume(c.name, c.email, c.resume_text, c.resume_url, c.linkedin_url) }}
+                              onClick={(e) => { e.preventDefault(); openResume(c.name, c.email, c.resume_text, c.resume_url) }}
                               className="flex-shrink-0 text-gray-400 hover:text-teal-600 transition-colors text-base"
                               title="View Resume"
                             >
@@ -1761,6 +2195,7 @@ export default function DashboardPage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-gray-100 text-left text-xs text-gray-400 font-semibold uppercase tracking-wide">
+                        <th className="pb-2 pr-3 w-8"></th>
                         <th className="pb-2 pr-3">Candidate</th>
                         <th className="pb-2 pr-3">Status</th>
                         <th className="pb-2 pr-3">Applied</th>
@@ -1786,16 +2221,6 @@ export default function DashboardPage() {
                               <p className="text-xs text-gray-400">{cand.email}</p>
                               {cand.headline && (
                                 <p className="text-xs text-gray-400 truncate max-w-[180px]">{cand.headline}</p>
-                              )}
-                              {cand.linkedin_url && (
-                                <a
-                                  href={cand.linkedin_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-xs text-teal-600 hover:text-teal-800 underline"
-                                >
-                                  LinkedIn profile
-                                </a>
                               )}
                             </td>
                             <td className="py-3 pr-3">
@@ -1833,7 +2258,7 @@ export default function DashboardPage() {
                                   <button
                                     onClick={() => {
                                       if (applicationResumeText) {
-                                        openResume(cand.name || applicationResumeName, cand.email || '', applicationResumeText, '', cand.linkedin_url)
+                                        openResume(cand.name || applicationResumeName, cand.email || '', applicationResumeText)
                                       } else {
                                         handleViewResume(cand.id)
                                       }
@@ -1865,6 +2290,10 @@ export default function DashboardPage() {
             {/* Match results */}
             {matchResults.length > 0 && (
               <div>
+                <BiasCheckBanner
+                  jdId={selectedJd?.id}
+                  refreshKey={matchResults.map((candidate) => candidate.candidate_id).join(',')}
+                />
                 <h2 className="text-base font-semibold text-gray-900 mb-4">
                   Ranked Shortlist
                   <span className="ml-2 text-sm font-normal text-gray-500">— {matchResults.length} candidates matched</span>
@@ -1875,10 +2304,10 @@ export default function DashboardPage() {
                     return (
                       <CandidateScoreCard
                         key={candidate.candidate_id}
-                        candidate={candidate}
+                        candidate={{ ...candidate, linkedin_url: fullCand?.linkedin_url || '', headline: fullCand?.headline || '' }}
                         rank={index + 1}
                         onViewResume={fullCand && (fullCand.resume_text || fullCand.resume_url)
-                          ? () => openResume(fullCand.name, fullCand.email, fullCand.resume_text, fullCand.resume_url, fullCand.linkedin_url)
+                          ? () => openResume(fullCand.name, fullCand.email, fullCand.resume_text, fullCand.resume_url)
                           : null}
                         onInvite={() => handleInvite(candidate.candidate_id, selectedJdId)}
                         isInvited={invitedCandidateIds.has(candidate.candidate_id)}
@@ -1891,6 +2320,10 @@ export default function DashboardPage() {
             )}
 
             {/* ── Screening Results ──────────────────────────────────── */}
+            {selectedJd?.id && (
+              <QuestionEffectivenessPanel jdId={selectedJd.id} />
+            )}
+
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-base font-semibold text-gray-900">
@@ -1919,6 +2352,72 @@ export default function DashboardPage() {
                   )}
                 </div>
               ) : (
+                <>
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedSessions.length === screeningResults.length && screeningResults.length > 0}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedSessions(screeningResults.map((r) => r.session_id))
+                        } else {
+                          setSelectedSessions([])
+                        }
+                      }}
+                      className="w-4 h-4 rounded accent-teal-600"
+                    />
+                    <span className="text-xs text-gray-500">
+                      {selectedSessions.length > 0
+                        ? `${selectedSessions.length} selected`
+                        : `Select all (${screeningResults.length})`}
+                    </span>
+                  </div>
+
+                  {selectedSessions.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => handleBulkDecision(null, 'advance')}
+                        disabled={bulkLoading}
+                        className="text-xs bg-teal-600 hover:bg-teal-700 text-white px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors"
+                      >
+                        Advance ({selectedSessions.length})
+                      </button>
+                      <button
+                        onClick={() => handleBulkDecision(null, 'reject')}
+                        disabled={bulkLoading}
+                        className="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors"
+                      >
+                        Reject ({selectedSessions.length})
+                      </button>
+                      <button
+                        onClick={() => handleBulkDecision(null, 'hold')}
+                        disabled={bulkLoading}
+                        className="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors"
+                      >
+                        Hold
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={handleAdvanceTop3}
+                    disabled={bulkLoading}
+                    className="text-xs bg-teal-50 hover:bg-teal-100 text-teal-700 border border-teal-200 px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors"
+                  >
+                    Advance top 3
+                  </button>
+                  <button
+                    onClick={handleRejectBelow60}
+                    disabled={bulkLoading}
+                    className="text-xs bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors"
+                  >
+                    Reject below 60%
+                  </button>
+                </div>
+
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
@@ -1940,6 +2439,21 @@ export default function DashboardPage() {
                         const integrity = INTEGRITY_DOT[r.integrity_risk] || INTEGRITY_DOT.none
                         return (
                           <tr key={r.session_id} className={`hover:bg-gray-50 transition-colors ${selectedSession === r.session_id ? 'bg-teal-50/50' : ''}`}>
+                            <td className="py-3 pr-3 align-top">
+                              <input
+                                type="checkbox"
+                                checked={selectedSessions.includes(r.session_id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedSessions((prev) => [...prev, r.session_id])
+                                  } else {
+                                    setSelectedSessions((prev) => prev.filter((id) => id !== r.session_id))
+                                  }
+                                }}
+                                className="w-4 h-4 rounded accent-teal-600"
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            </td>
                             <td className="py-3 pr-3">
                               <p className="font-medium text-gray-800">{r.candidate_name}</p>
                               <p className="text-xs text-gray-400">{r.candidate_email}</p>
@@ -1993,6 +2507,7 @@ export default function DashboardPage() {
                     </tbody>
                   </table>
                 </div>
+                </>
               )}
             </div>
 
@@ -2160,6 +2675,11 @@ export default function DashboardPage() {
           </div>
         )}
       </main>
+
+      {(() => {
+        try { return <ChatAgent /> }
+        catch (e) { console.error('ChatAgent render error:', e); return null }
+      })()}
     </div>
   )
 }

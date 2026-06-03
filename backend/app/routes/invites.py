@@ -146,144 +146,163 @@ async def create_invite(
     Creates a unique token tied to this candidate+JD pair.
     Resume is pre-loaded from the candidate's profile.
     """
-    owned_jd = (
-        supabase.table("jd_posts")
-        .select("id, title")
-        .eq("id", request.jd_id)
-        .eq("recruiter_id", recruiter_id)
-        .limit(1)
-        .execute()
+    import re as _re
+    _uuid_re = _re.compile(
+        r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+        _re.I
     )
-    if not owned_jd.data:
-        raise HTTPException(status_code=404, detail="Job description not found or not owned by you")
+    if not _uuid_re.match(str(request.candidate_id)):
+        raise HTTPException(status_code=400, detail="Invalid candidate_id")
+    if not _uuid_re.match(str(request.jd_id)):
+        raise HTTPException(status_code=400, detail="Invalid jd_id")
 
-    # Return existing pending/started invite rather than creating a duplicate
-    existing = (
-        supabase.table("screening_invites")
-        .select("id, token, status")
-        .eq("candidate_id", request.candidate_id)
-        .eq("jd_id", request.jd_id)
-        .limit(1)
-        .execute()
-    )
-    if existing.data:
-        inv = existing.data[0]
-        if inv["status"] in ("pending", "started"):
-            return {
-                "invite_id": inv["id"],
-                "token": inv["token"],
-                "message": "Invite already exists",
-                "status": inv["status"],
-                "screening_url": f"/screen/{inv['token']}",
-            }
+    try:
+        owned_jd = (
+            supabase.table("jd_posts")
+            .select("id, title")
+            .eq("id", request.jd_id)
+            .eq("recruiter_id", recruiter_id)
+            .limit(1)
+            .execute()
+        )
+        if not owned_jd.data:
+            raise HTTPException(status_code=404, detail="Job description not found or not owned by you")
 
-        if inv["status"] in ("expired", "completed"):
-            token = secrets.token_urlsafe(16)
-            candidate = (
-                supabase.table("candidates")
-                .select("resume_text, resume_url, name, email")
-                .eq("id", request.candidate_id)
-                .limit(1)
-                .execute()
-            )
-            application = (
-                supabase.table("jd_applications")
-                .select("resume_text")
-                .eq("candidate_id", request.candidate_id)
-                .eq("jd_id", request.jd_id)
-                .limit(1)
-                .execute()
-            )
-            candidate_data = candidate.data[0] if candidate.data else {}
-            application_resume = application.data[0].get("resume_text") if application.data else ""
-            refreshed = (
-                supabase.table("screening_invites")
-                .update({
-                    "token": token,
-                    "status": "pending",
-                    "started_at": None,
-                    "completed_at": None,
-                    "resume_text": application_resume or candidate_data.get("resume_text", ""),
-                    "resume_url": candidate_data.get("resume_url"),
-                    "candidate_name": candidate_data.get("name", ""),
-                    "candidate_email": candidate_data.get("email", ""),
-                })
-                .eq("id", inv["id"])
-                .execute()
-            )
-            if refreshed.data:
-                print(f"[create_invite] Refreshing invite — updating jd_applications: candidate_id={request.candidate_id}, jd_id={request.jd_id}")
-                app_update = client.table("jd_applications") \
-                    .update({"status": "invited"}) \
-                    .eq("candidate_id", request.candidate_id) \
-                    .eq("jd_id", request.jd_id) \
-                    .execute()
-                print(f"[create_invite] jd_applications refresh update result: {app_update.data}")
+        # Return existing pending/started invite rather than creating a duplicate
+        existing = (
+            supabase.table("screening_invites")
+            .select("id, token, status")
+            .eq("candidate_id", request.candidate_id)
+            .eq("jd_id", request.jd_id)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            inv = existing.data[0]
+            if inv["status"] in ("pending", "started"):
                 return {
                     "invite_id": inv["id"],
-                    "token": token,
-                    "message": "Invite refreshed",
-                    "status": "pending",
-                    "screening_url": f"/screen/{token}",
+                    "token": inv["token"],
+                    "message": "Invite already exists",
+                    "status": inv["status"],
+                    "screening_url": f"/screen/{inv['token']}",
                 }
 
-    # Fetch candidate resume
-    candidate = (
-        supabase.table("candidates")
-        .select("id, name, email, resume_url, resume_text")
-        .eq("id", request.candidate_id)
-        .single()
-        .execute()
-    )
-    if not candidate.data:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    application = (
-        supabase.table("jd_applications")
-        .select("resume_text")
-        .eq("candidate_id", request.candidate_id)
-        .eq("jd_id", request.jd_id)
-        .limit(1)
-        .execute()
-    )
-    application_resume = application.data[0].get("resume_text") if application.data else ""
+            if inv["status"] in ("expired", "completed"):
+                token = secrets.token_urlsafe(16)
+                candidate = (
+                    supabase.table("candidates")
+                    .select("resume_text, resume_url, name, email")
+                    .eq("id", request.candidate_id)
+                    .limit(1)
+                    .execute()
+                )
+                application = (
+                    supabase.table("jd_applications")
+                    .select("resume_text")
+                    .eq("candidate_id", request.candidate_id)
+                    .eq("jd_id", request.jd_id)
+                    .limit(1)
+                    .execute()
+                )
+                candidate_data = candidate.data[0] if candidate.data else {}
+                application_resume = application.data[0].get("resume_text") if application.data else ""
+                refreshed = (
+                    supabase.table("screening_invites")
+                    .update({
+                        "token": token,
+                        "status": "pending",
+                        "started_at": None,
+                        "completed_at": None,
+                        "resume_text": application_resume or candidate_data.get("resume_text", ""),
+                        "resume_url": candidate_data.get("resume_url"),
+                        "candidate_name": candidate_data.get("name", ""),
+                        "candidate_email": candidate_data.get("email", ""),
+                    })
+                    .eq("id", inv["id"])
+                    .execute()
+                )
+                if refreshed.data:
+                    print(f"[create_invite] Refreshing invite — updating jd_applications: candidate_id={request.candidate_id}, jd_id={request.jd_id}")
+                    app_update = client.table("jd_applications") \
+                        .update({"status": "invited"}) \
+                        .eq("candidate_id", request.candidate_id) \
+                        .eq("jd_id", request.jd_id) \
+                        .execute()
+                    print(f"[create_invite] jd_applications refresh update result: {app_update.data}")
+                    return {
+                        "invite_id": inv["id"],
+                        "token": token,
+                        "message": "Invite refreshed",
+                        "status": "pending",
+                        "screening_url": f"/screen/{token}",
+                    }
 
-    token = secrets.token_urlsafe(16)
+        # Fetch candidate resume
+        candidate = (
+            supabase.table("candidates")
+            .select("id, name, email, resume_url, resume_text")
+            .eq("id", request.candidate_id)
+            .single()
+            .execute()
+        )
+        if not candidate.data:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        application = (
+            supabase.table("jd_applications")
+            .select("resume_text")
+            .eq("candidate_id", request.candidate_id)
+            .eq("jd_id", request.jd_id)
+            .limit(1)
+            .execute()
+        )
+        application_resume = application.data[0].get("resume_text") if application.data else ""
 
-    invite = (
-        supabase.table("screening_invites")
-        .insert({
-            "candidate_id": request.candidate_id,
-            "jd_id": request.jd_id,
-            "recruiter_id": recruiter_id,
+        token = secrets.token_urlsafe(16)
+
+        invite = (
+            supabase.table("screening_invites")
+            .insert({
+                "candidate_id": request.candidate_id,
+                "jd_id": request.jd_id,
+                "recruiter_id": recruiter_id,
+                "token": token,
+                "status": "pending",
+                "resume_url": candidate.data.get("resume_url"),
+                "resume_text": application_resume or candidate.data.get("resume_text", ""),
+                "candidate_name": candidate.data.get("name", ""),
+                "candidate_email": candidate.data.get("email", ""),
+            })
+            .execute()
+        )
+        if not invite.data:
+            raise HTTPException(status_code=500, detail="Failed to create screening invite")
+
+        # Update application status to invited if an application exists
+        print(f"[create_invite] New invite — updating jd_applications: candidate_id={request.candidate_id}, jd_id={request.jd_id}")
+        app_update = client.table("jd_applications") \
+            .update({"status": "invited"}) \
+            .eq("candidate_id", request.candidate_id) \
+            .eq("jd_id", request.jd_id) \
+            .execute()
+        print(f"[create_invite] jd_applications new invite update result: {app_update.data}")
+
+        return {
+            "invite_id": invite.data[0]["id"],
             "token": token,
+            "candidate_name": candidate.data["name"],
+            "jd_title": owned_jd.data[0]["title"],
             "status": "pending",
-            "resume_url": candidate.data.get("resume_url"),
-            "resume_text": application_resume or candidate.data.get("resume_text", ""),
-            "candidate_name": candidate.data.get("name", ""),
-            "candidate_email": candidate.data.get("email", ""),
-        })
-        .execute()
-    )
-    if not invite.data:
-        raise HTTPException(status_code=500, detail="Failed to create screening invite")
+            "screening_url": f"/screen/{token}",
+        }
 
-    # Update application status to invited if an application exists
-    print(f"[create_invite] New invite — updating jd_applications: candidate_id={request.candidate_id}, jd_id={request.jd_id}")
-    app_update = client.table("jd_applications") \
-        .update({"status": "invited"}) \
-        .eq("candidate_id", request.candidate_id) \
-        .eq("jd_id", request.jd_id) \
-        .execute()
-    print(f"[create_invite] jd_applications new invite update result: {app_update.data}")
-
-    return {
-        "invite_id": invite.data[0]["id"],
-        "token": token,
-        "candidate_name": candidate.data["name"],
-        "jd_title": owned_jd.data[0]["title"],
-        "status": "pending",
-        "screening_url": f"/screen/{token}",
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"[invites/create] ERROR: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/for-jd/{jd_id}")

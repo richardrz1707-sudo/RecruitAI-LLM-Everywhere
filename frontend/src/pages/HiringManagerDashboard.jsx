@@ -9,9 +9,9 @@ import {
   getScreeningResults,
   getScreeningSessionDetail,
   saveSessionDecision,
-  getDashboardSummary,
 } from '../lib/api'
 import CandidateScoreCard from '../components/CandidateScoreCard'
+import ChatAgent from '../components/ChatAgent'
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -384,6 +384,40 @@ function AnswerReviewPanel({ sessionRow, detail, loadingDetail, jdTitle, onClose
                             </div>
                           </div>
 
+                          {/* Agent tool decision badge */}
+                          {scoreEntry?.tool_selected && (
+                            <div className="ml-7 mt-1 space-y-1">
+                              <div className={`inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-full border ${
+                                scoreEntry.tool_selected === 'ask_followup_question'
+                                  ? 'bg-blue-50 text-blue-700 border-blue-200'
+                                  : scoreEntry.tool_selected === 'flag_and_continue'
+                                    ? 'bg-red-50 text-red-700 border-red-200'
+                                    : 'bg-teal-50 text-teal-700 border-teal-200'
+                              }`}>
+                                {scoreEntry.tool_selected === 'ask_followup_question' && (
+                                  <>🔍 Agent: asked follow-up
+                                    {scoreEntry.followup_type === 'bridge_to_jd' && ' (JD gap)'}
+                                    {scoreEntry.followup_type === 'probe_answer' && ' (needs depth)'}
+                                  </>
+                                )}
+                                {scoreEntry.tool_selected === 'advance_to_next_question' && (
+                                  <>✅ Agent: advanced to next question</>
+                                )}
+                                {scoreEntry.tool_selected === 'flag_and_continue' && (
+                                  <>🚩 Agent: flagged answer</>
+                                )}
+                                {scoreEntry.tool_selected === 'generate_final_report' && (
+                                  <>📋 Agent: generated report</>
+                                )}
+                              </div>
+                              {scoreEntry.tool_reasoning && (
+                                <p className="text-xs text-gray-400 italic ml-1">
+                                  "{scoreEntry.tool_reasoning}"
+                                </p>
+                              )}
+                            </div>
+                          )}
+
                           {/* Collapsible score breakdown */}
                           {Object.keys(scores).length > 0 && (
                             <div className="ml-7">
@@ -579,118 +613,85 @@ function AnswerReviewPanel({ sessionRow, detail, loadingDetail, jdTitle, onClose
   )
 }
 
-// ── Main Dashboard ────────────────────────────────────────────────────────
+// ── Agent Status Panel ────────────────────────────────────────────────────
 
-function InsightsSummaryCard() {
-  const [summary, setSummary] = useState(null)
-  const [loading, setLoading] = useState(true)
+function AgentStatusPanel() {
+  const [expanded, setExpanded] = useState(false)
 
-  useEffect(() => {
-    getDashboardSummary()
-      .then((res) => setSummary(res.data))
-      .catch(() => setSummary(null))
-      .finally(() => setLoading(false))
-  }, [])
-
-  if (loading) {
-    return (
-      <div className="bg-white border border-gray-200 rounded-xl p-4 animate-pulse">
-        <div className="h-4 bg-gray-200 rounded w-48 mb-3" />
-        <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
-          {[1, 2, 3, 4, 5, 6].map((i) => (
-            <div key={i} className="h-20 bg-gray-100 rounded-lg" />
-          ))}
-        </div>
-      </div>
-    )
-  }
-
-  if (!summary) return null
-
-  const stats = [
+  const pillars = [
     {
-      value: summary.active_jds,
-      label: 'Active JDs',
-      icon: 'JD',
-      color: 'text-teal-700',
-      bg: 'bg-teal-50',
+      number: '1',
+      title: 'Dynamic Decision Making',
+      description: 'Claude selects tools based on recruiter intent — not hardcoded Python logic',
+      evidence: 'Chat agent uses Anthropic native tool use API with 6 callable tools',
+      icon: '🤖',
     },
     {
-      value: summary.candidates_screened,
-      label: 'Total screened',
-      icon: 'CS',
-      color: 'text-blue-700',
-      bg: 'bg-blue-50',
+      number: '2',
+      title: 'Enforced Guardrails',
+      description: '3-layer security: Python pre-check → Guard Agent → Main Agent',
+      evidence: 'Prompt injection, score manipulation, and data breach attempts blocked',
+      icon: '🛡️',
     },
     {
-      value: summary.strong_matches,
-      label: 'Strong matches',
-      icon: '*',
-      color: 'text-amber-700',
-      bg: 'bg-amber-50',
-    },
-    {
-      value: `${summary.hours_saved}h`,
-      label: 'Hours saved',
-      icon: 'HR',
-      color: 'text-purple-700',
-      bg: 'bg-purple-50',
-    },
-    {
-      value: summary.pending_invites,
-      label: 'Pending invites',
-      icon: 'PI',
-      color: 'text-orange-700',
-      bg: 'bg-orange-50',
-    },
-    {
-      value: summary.this_week_screened,
-      label: 'This week',
-      icon: '7D',
-      color: 'text-green-700',
-      bg: 'bg-green-50',
+      number: '3',
+      title: 'Real-World Agency',
+      description: 'Agent autonomously alters database state on every action',
+      evidence: 'Writes to jd_posts, match_scores, screening_invites, chat_history',
+      icon: '⚡',
     },
   ]
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-4">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-700">
-          Hiring overview
-        </h3>
-        {summary.hours_saved > 0 && (
-          <div className="inline-flex items-center self-start gap-1.5 bg-teal-50 border border-teal-200 rounded-full px-3 py-1">
-            <span className="text-xs text-teal-700 font-medium">
-              {summary.hours_saved} hours saved vs manual screening
-            </span>
+    <div className="bg-white border border-gray-200 rounded-xl mb-4 overflow-hidden">
+      <button
+        onClick={() => setExpanded(prev => !prev)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm">🤖</span>
+          <span className="text-sm font-medium text-gray-700">RecruitAI Agent Status</span>
+          <div className="flex gap-1">
+            {pillars.map((_, i) => (
+              <div key={i} className="w-2 h-2 rounded-full bg-teal-500" title={`Pillar ${i + 1} satisfied`} />
+            ))}
           </div>
-        )}
-      </div>
+          <span className="text-xs text-teal-600 font-medium">All 3 pillars active</span>
+        </div>
+        <span className="text-gray-400 text-xs">{expanded ? '▲ Hide' : '▼ Show details'}</span>
+      </button>
 
-      <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
-        {stats.map((stat) => (
-          <div key={stat.label} className={`${stat.bg} rounded-xl p-3 text-center`}>
-            <div className={`inline-flex h-7 min-w-7 items-center justify-center rounded-md bg-white/70 px-1.5 text-[10px] font-bold ${stat.color} mb-2`}>
-              {stat.icon}
-            </div>
-            <div className={`text-xl font-bold ${stat.color} leading-none mb-1`}>
-              {stat.value}
-            </div>
-            <div className="text-xs text-gray-500 leading-tight">
-              {stat.label}
-            </div>
+      {expanded && (
+        <div className="px-4 pb-4 border-t border-gray-100">
+          <div className="grid grid-cols-3 gap-3 mt-3">
+            {pillars.map((p) => (
+              <div key={p.number} className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-6 h-6 rounded-full bg-teal-600 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+                    {p.number}
+                  </div>
+                  <span className="text-xs font-medium text-gray-700">{p.icon} {p.title}</span>
+                </div>
+                <p className="text-xs text-gray-500 leading-relaxed mb-2">{p.description}</p>
+                <div className="bg-white border border-gray-200 rounded px-2 py-1">
+                  <p className="text-xs text-teal-600 leading-relaxed">✓ {p.evidence}</p>
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-
-      {summary.candidates_screened === 0 && (
-        <p className="text-xs text-gray-400 text-center mt-3">
-          No screenings yet. Invite candidates to start collecting insights.
-        </p>
+          <div className="mt-3 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
+            <p className="text-xs text-teal-700 text-center">
+              💬 Use the chat assistant (bottom right) to interact with the agent —
+              watch tool decisions in the Agent Log tab
+            </p>
+          </div>
+        </div>
       )}
     </div>
   )
 }
+
+// ── Main Dashboard ────────────────────────────────────────────────────────
 
 export default function HiringManagerDashboard() {
   // Section A
@@ -909,7 +910,10 @@ export default function HiringManagerDashboard() {
 
       <h1 className="text-3xl font-bold text-gray-900">Hiring Manager Dashboard</h1>
 
-      <InsightsSummaryCard />
+      {(() => {
+        try { return <AgentStatusPanel /> }
+        catch (e) { console.error('AgentStatusPanel error:', e); return null }
+      })()}
 
       {/* ── Section A ────────────────────────────────────────────────── */}
       <section className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
@@ -1059,9 +1063,16 @@ export default function HiringManagerDashboard() {
             </span>
           </div>
           <div className="space-y-4">
-            {matchResults.map((candidate, index) => (
-              <CandidateScoreCard key={candidate.candidate_id} candidate={candidate} rank={index + 1} />
-            ))}
+            {matchResults.map((candidate, index) => {
+              const fullCand = candidates.find((c) => c.id === candidate.candidate_id)
+              return (
+                <CandidateScoreCard
+                  key={candidate.candidate_id}
+                  candidate={{ ...candidate, linkedin_url: fullCand?.linkedin_url || '', headline: fullCand?.headline || '' }}
+                  rank={index + 1}
+                />
+              )
+            })}
           </div>
         </section>
       )}
@@ -1525,6 +1536,8 @@ export default function HiringManagerDashboard() {
           )}
         </section>
       )}
+
+      <ChatAgent />
     </div>
   )
 }

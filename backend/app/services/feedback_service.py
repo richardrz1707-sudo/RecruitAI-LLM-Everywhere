@@ -36,8 +36,7 @@ Return ONLY valid JSON, no markdown, no backticks.
     "Tip 1 - specific and actionable",
     "Tip 2 - specific and actionable",
     "Tip 3 - specific and actionable"
-  ],
-  "next_steps": "one sentence on what to do before next interview"
+  ]
 }"""
 
 
@@ -198,15 +197,35 @@ async def generate_candidate_feedback(
         )
 
         try:
+            import json as _json
             raw = await call_claude(
                 _FEEDBACK_SYSTEM_PROMPT,
                 [{"role": "user", "content": user_message}],
-                max_tokens=MAX_TOKENS["feedback_gen"],
+                max_tokens=800,  # raised from 500 — feedback JSON is verbose
                 model="claude-haiku-4-5-20251001",
             )
-            parsed = safe_json_parse(raw, fallback={})
+            clean = (raw or "").strip()
+            clean = clean.replace("```json", "").replace("```", "").strip()
+
+            start = clean.find("{")
+            end = clean.rfind("}") + 1
+
+            if start != -1 and end > start:
+                try:
+                    parsed = _json.loads(clean[start:end])
+                except _json.JSONDecodeError:
+                    # Attempt to complete truncated JSON by closing open braces
+                    try:
+                        partial = clean[start:]
+                        missing = partial.count("{") - partial.count("}")
+                        parsed = _json.loads(partial + "}" * max(missing, 1))
+                    except Exception:
+                        parsed = {}
+            else:
+                parsed = {}
         except Exception as e:
             print(f"[feedback] Claude generation failed: {e}")
+            parsed = {}
 
     feedback = _normalise_feedback(parsed, jd_title, avg_scores, overall_score)
     row = {
@@ -218,7 +237,6 @@ async def generate_candidate_feedback(
         "strengths": feedback["strengths"],
         "improvement_areas": feedback["improvement_areas"],
         "coaching_tips": feedback["coaching_tips"],
-        "next_steps": feedback["next_steps"],
         "recommended_jds": recommendations,
     }
 
