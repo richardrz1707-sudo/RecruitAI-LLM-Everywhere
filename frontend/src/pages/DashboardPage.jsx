@@ -7,7 +7,7 @@ import {
   getJDPosts, updateJD, archiveJD, duplicateJD, logout,
   createInvite, getApplicationsForJd, updateApplicationStatus,
   getCandidateResume, addCandidateManually, updateJdVisibility,
-  previewInviteQuestions, saveInviteQuestions,
+  previewInviteQuestions, saveInviteQuestions, getDashboardSummary,
 } from '../lib/api'
 import { useAuthStore } from '../lib/auth'
 import { toast } from '../components/Toast'
@@ -625,6 +625,107 @@ function NewJDModal({ onClose, onCreated }) {
 }
 
 // ── Main Dashboard ────────────────────────────────────────────────────────
+
+function InsightsSummaryCard({ refreshKey }) {
+  const [summary, setSummary] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
+
+  const fallbackSummary = {
+    active_jds: 0,
+    candidates_screened: 0,
+    strong_matches: 0,
+    hours_saved: 0,
+    pending_invites: 0,
+    this_week_screened: 0,
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setLoadError(false)
+    getDashboardSummary()
+      .then((res) => {
+        if (!cancelled) setSummary(res.data)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSummary(fallbackSummary)
+          setLoadError(true)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [refreshKey])
+
+  if (loading) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-xl p-4 animate-pulse">
+        <div className="h-4 bg-gray-200 rounded w-48 mb-3" />
+        <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+          {[1, 2, 3, 4, 5, 6].map((i) => (
+            <div key={i} className="h-20 bg-gray-100 rounded-lg" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const safeSummary = summary || fallbackSummary
+
+  const stats = [
+    { value: safeSummary.active_jds, label: 'Active JDs', icon: 'JD', color: 'text-teal-700', bg: 'bg-teal-50' },
+    { value: safeSummary.candidates_screened, label: 'Total screened', icon: 'CS', color: 'text-blue-700', bg: 'bg-blue-50' },
+    { value: safeSummary.strong_matches, label: 'Strong matches', icon: '*', color: 'text-amber-700', bg: 'bg-amber-50' },
+    { value: `${safeSummary.hours_saved}h`, label: 'Hours saved', icon: 'HR', color: 'text-purple-700', bg: 'bg-purple-50' },
+    { value: safeSummary.pending_invites, label: 'Pending invites', icon: 'PI', color: 'text-orange-700', bg: 'bg-orange-50' },
+    { value: safeSummary.this_week_screened, label: 'This week', icon: '7D', color: 'text-green-700', bg: 'bg-green-50' },
+  ]
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
+        <h3 className="text-sm font-medium text-gray-700">Hiring overview</h3>
+        {safeSummary.hours_saved > 0 && (
+          <div className="inline-flex items-center self-start gap-1.5 bg-teal-50 border border-teal-200 rounded-full px-3 py-1">
+            <span className="text-xs text-teal-700 font-medium">
+              {safeSummary.hours_saved} hours saved vs manual screening
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+        {stats.map((stat) => (
+          <div key={stat.label} className={`${stat.bg} rounded-xl p-3 text-center`}>
+            <div className={`inline-flex h-7 min-w-7 items-center justify-center rounded-md bg-white/70 px-1.5 text-[10px] font-bold ${stat.color} mb-2`}>
+              {stat.icon}
+            </div>
+            <div className={`text-xl font-bold ${stat.color} leading-none mb-1`}>
+              {stat.value}
+            </div>
+            <div className="text-xs text-gray-500 leading-tight">{stat.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {loadError ? (
+        <p className="text-xs text-amber-600 text-center mt-3">
+          Summary data is unavailable. Restart the backend to load live metrics.
+        </p>
+      ) : safeSummary.candidates_screened === 0 && (
+        <p className="text-xs text-gray-400 text-center mt-3">
+          No screenings yet. Invite candidates to start collecting insights.
+        </p>
+      )}
+    </div>
+  )
+}
 
 export default function DashboardPage() {
   const navigate = useNavigate()
@@ -1409,6 +1510,10 @@ export default function DashboardPage() {
 
       {/* ── Main panel ──────────────────────────────────────────────── */}
       <main className="flex-1 overflow-y-auto">
+        <div className="p-6 pb-0 max-w-5xl mx-auto">
+          <InsightsSummaryCard refreshKey={`${activeJds.length}-${screeningResults.length}`} />
+        </div>
+
         {!selectedJd ? (
           /* Empty state */
           <div className="flex flex-col items-center justify-center h-full text-center p-8">

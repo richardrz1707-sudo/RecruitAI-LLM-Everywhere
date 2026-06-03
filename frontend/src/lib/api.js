@@ -62,6 +62,9 @@ export const getPublicJDList = () => api.get('/candidates/jd-list')
 
 export const createJD = (data) => api.post('/hiring-manager/create-jd', data)
 
+export const getDashboardSummary = () =>
+  api.get('/hiring-manager/dashboard-summary')
+
 /** Auth-required — returns recruiter's own JDs with screening_count */
 export const getJDPosts = (status = 'active') =>
   api.get(`/hiring-manager/jd-posts?status=${status}`)

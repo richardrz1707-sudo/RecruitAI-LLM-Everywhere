@@ -3,7 +3,12 @@ Phase 5 — Hiring Manager routes with Supabase Auth + RLS.
 All routes use get_authed_client so RLS filters to the recruiter's own data.
 Zero new AI calls — no credit cost.
 """
+from datetime import datetime, timedelta, timezone
+import secrets
+from typing import List
+
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from pydantic import BaseModel
 from app.database import supabase, get_authed_client, get_current_user_id
 from app.models.schemas import (
     JDCreate, ParseJDRequest, MatchRequest, UpdateJDRequest,
@@ -13,6 +18,105 @@ from app.services.matching import parse_jd, rank_candidates, get_dynamic_weights
 from app.services.resume_parser import parse_resume
 
 router = APIRouter()
+
+
+class BulkDecisionRequest(BaseModel):
+    session_ids: List[str]
+    decision: str
+    reason: str = ""
+
+
+class BulkInviteRequest(BaseModel):
+    candidate_ids: List[str]
+    jd_id: str
+
+
+@router.get("/dashboard-summary")
+async def get_dashboard_summary(
+    client=Depends(get_authed_client),
+    recruiter_id: str = Depends(get_current_user_id),
+):
+    """
+    Returns hiring metrics summary for the recruiter dashboard header card.
+    Calculated from existing data with zero Claude calls.
+    """
+    empty_summary = {
+        "active_jds": 0,
+        "total_applications": 0,
+        "candidates_screened": 0,
+        "this_week_screened": 0,
+        "strong_matches": 0,
+        "avg_screening_minutes": 0,
+        "hours_saved": 0,
+        "pending_invites": 0,
+    }
+
+    try:
+        jds = (
+            client.table("jd_posts")
+            .select("id")
+            .eq("recruiter_id", recruiter_id)
+            .neq("status", "archived")
+            .execute()
+        )
+        active_jds = len(jds.data or [])
+        jd_ids = [j["id"] for j in (jds.data or [])]
+
+        if not jd_ids:
+            return empty_summary
+
+        sessions = (
+            supabase.table("screening_sessions")
+            .select("id, created_at, report_json")
+            .in_("jd_id", jd_ids)
+            .eq("status", "completed")
+            .execute()
+        )
+        all_sessions = sessions.data or []
+        total_screened = len(all_sessions)
+
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        this_week_count = len([
+            s for s in all_sessions
+            if (s.get("created_at") or "") >= week_ago
+        ])
+
+        strong_matches = sum(
+            1 for s in all_sessions
+            if ((s.get("report_json") or {}).get("overall_score") or 0) >= 75
+        )
+
+        invites = (
+            supabase.table("screening_invites")
+            .select("id")
+            .in_("jd_id", jd_ids)
+            .eq("status", "pending")
+            .execute()
+        )
+
+        apps = (
+            supabase.table("jd_applications")
+            .select("id")
+            .in_("jd_id", jd_ids)
+            .execute()
+        )
+
+        return {
+            "active_jds": active_jds,
+            "total_applications": len(apps.data or []),
+            "candidates_screened": total_screened,
+            "this_week_screened": this_week_count,
+            "strong_matches": strong_matches,
+            "avg_screening_minutes": 10,
+            "hours_saved": round((total_screened * 30) / 60, 1),
+            "pending_invites": len(invites.data or []),
+        }
+    except Exception as e:
+        import traceback
+
+        print(f"Dashboard summary error: {e}")
+        print(traceback.format_exc())
+        return empty_summary
 
 
 # ── JD management ─────────────────────────────────────────────────────────

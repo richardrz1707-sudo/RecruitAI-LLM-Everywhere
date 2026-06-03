@@ -9,6 +9,7 @@ import {
   getScreeningResults,
   getScreeningSessionDetail,
   saveSessionDecision,
+  getDashboardSummary,
 } from '../lib/api'
 import CandidateScoreCard from '../components/CandidateScoreCard'
 
@@ -580,6 +581,117 @@ function AnswerReviewPanel({ sessionRow, detail, loadingDetail, jdTitle, onClose
 
 // ── Main Dashboard ────────────────────────────────────────────────────────
 
+function InsightsSummaryCard() {
+  const [summary, setSummary] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    getDashboardSummary()
+      .then((res) => setSummary(res.data))
+      .catch(() => setSummary(null))
+      .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-xl p-4 animate-pulse">
+        <div className="h-4 bg-gray-200 rounded w-48 mb-3" />
+        <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+          {[1, 2, 3, 4, 5, 6].map((i) => (
+            <div key={i} className="h-20 bg-gray-100 rounded-lg" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (!summary) return null
+
+  const stats = [
+    {
+      value: summary.active_jds,
+      label: 'Active JDs',
+      icon: 'JD',
+      color: 'text-teal-700',
+      bg: 'bg-teal-50',
+    },
+    {
+      value: summary.candidates_screened,
+      label: 'Total screened',
+      icon: 'CS',
+      color: 'text-blue-700',
+      bg: 'bg-blue-50',
+    },
+    {
+      value: summary.strong_matches,
+      label: 'Strong matches',
+      icon: '*',
+      color: 'text-amber-700',
+      bg: 'bg-amber-50',
+    },
+    {
+      value: `${summary.hours_saved}h`,
+      label: 'Hours saved',
+      icon: 'HR',
+      color: 'text-purple-700',
+      bg: 'bg-purple-50',
+    },
+    {
+      value: summary.pending_invites,
+      label: 'Pending invites',
+      icon: 'PI',
+      color: 'text-orange-700',
+      bg: 'bg-orange-50',
+    },
+    {
+      value: summary.this_week_screened,
+      label: 'This week',
+      icon: '7D',
+      color: 'text-green-700',
+      bg: 'bg-green-50',
+    },
+  ]
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl p-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
+        <h3 className="text-sm font-medium text-gray-700">
+          Hiring overview
+        </h3>
+        {summary.hours_saved > 0 && (
+          <div className="inline-flex items-center self-start gap-1.5 bg-teal-50 border border-teal-200 rounded-full px-3 py-1">
+            <span className="text-xs text-teal-700 font-medium">
+              {summary.hours_saved} hours saved vs manual screening
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+        {stats.map((stat) => (
+          <div key={stat.label} className={`${stat.bg} rounded-xl p-3 text-center`}>
+            <div className={`inline-flex h-7 min-w-7 items-center justify-center rounded-md bg-white/70 px-1.5 text-[10px] font-bold ${stat.color} mb-2`}>
+              {stat.icon}
+            </div>
+            <div className={`text-xl font-bold ${stat.color} leading-none mb-1`}>
+              {stat.value}
+            </div>
+            <div className="text-xs text-gray-500 leading-tight">
+              {stat.label}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {summary.candidates_screened === 0 && (
+        <p className="text-xs text-gray-400 text-center mt-3">
+          No screenings yet. Invite candidates to start collecting insights.
+        </p>
+      )}
+    </div>
+  )
+}
+
 export default function HiringManagerDashboard() {
   // Section A
   const [jdTitle, setJdTitle] = useState('')
@@ -796,6 +908,8 @@ export default function HiringManagerDashboard() {
       )}
 
       <h1 className="text-3xl font-bold text-gray-900">Hiring Manager Dashboard</h1>
+
+      <InsightsSummaryCard />
 
       {/* ── Section A ────────────────────────────────────────────────── */}
       <section className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
