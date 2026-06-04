@@ -43,6 +43,17 @@ async def update_application_status(
     recruiter_id: str = Depends(get_current_user_id),
 ):
     """Recruiter shortlists, rejects, or marks candidate as invited."""
+    status_map = {
+        "advanced": "shortlisted",
+        "rejected": "rejected",
+        "applied": "applied",
+        "shortlisted": "shortlisted",
+        "invited": "invited",
+    }
+    db_status = status_map.get((request.status or "").strip().lower())
+    if not db_status:
+        raise HTTPException(status_code=400, detail="Invalid application status")
+
     app = (
         supabase.table("jd_applications")
         .select("id, jd_id")
@@ -66,10 +77,10 @@ async def update_application_status(
 
     result = (
         supabase.table("jd_applications")
-        .update({"status": request.status})
+        .update({"status": db_status})
         .eq("id", request.application_id)
         .execute()
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Application not found")
-    return {"success": True, "status": request.status}
+    return {"success": True, "status": db_status}

@@ -1041,6 +1041,15 @@ export default function DashboardPage() {
       .filter(Boolean)
   ), [applications, candidates])
 
+  const applicationByEmail = useMemo(() => {
+    const byEmail = new Map()
+    applications.forEach((app) => {
+      const email = (app.candidates?.email || '').toLowerCase().trim()
+      if (email) byEmail.set(email, app)
+    })
+    return byEmail
+  }, [applications])
+
   // ── Load JD list + candidates on mount ───────────────────────────────
   useEffect(() => {
     loadJdList()
@@ -1286,6 +1295,33 @@ export default function DashboardPage() {
   }
   const handleDecisionSaved = (sessionId, decision) => {
     setScreeningResults((prev) => prev.map((r) => r.session_id === sessionId ? { ...r, recruiter_decision: decision } : r))
+  }
+
+  const handleInformCandidateDecision = async (screeningRow, status) => {
+    const email = (screeningRow.candidate_email || '').toLowerCase().trim()
+    const app = applicationByEmail.get(email)
+
+    if (!app?.id) {
+      toast.error('No application record found for this screened candidate')
+      return
+    }
+
+    try {
+      const response = await updateApplicationStatus(app.id, status)
+      const savedStatus = response.data?.status || (status === 'advanced' ? 'shortlisted' : status)
+      setApplications((prev) =>
+        prev.map((item) => item.id === app.id ? { ...item, status: savedStatus } : item)
+      )
+      toast.success(
+        status === 'advanced'
+          ? 'Candidate marked as Advanced to next stage.'
+          : 'Candidate marked as Rejected.'
+      )
+      loadApplications(selectedJdId)
+      loadScreeningResults(selectedJdId)
+    } catch {
+      toast.error('Failed to update candidate decision')
+    }
   }
 
   // ── Applications ──────────────────────────────────────────────────────────
@@ -2312,6 +2348,8 @@ export default function DashboardPage() {
                         const rec = HIRE_REC[r.hire_recommendation] || HIRE_REC.maybe
                         const gradeStyle = GRADE_STYLES[r.overall_grade] || GRADE_STYLES.F
                         const integrity = INTEGRITY_DOT[r.integrity_risk] || INTEGRITY_DOT.none
+                        const application = applicationByEmail.get((r.candidate_email || '').toLowerCase().trim())
+                        const applicationStatus = application?.status
                         return (
                           <tr key={r.session_id} className={`hover:bg-gray-50 transition-colors ${selectedSession === r.session_id ? 'bg-teal-50/50' : ''}`}>
                             <td className="py-3 pr-3 align-top">
@@ -2358,6 +2396,27 @@ export default function DashboardPage() {
                                   <button onClick={() => handleQuickDecision(r.session_id, 'hold')} title="Hold" className="w-6 h-6 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-700 flex items-center justify-center text-xs font-bold transition-colors">?</button>
                                 </div>
                               )}
+                              <div className="mt-2 flex flex-col gap-1.5 min-w-[150px]">
+                                {applicationStatus === 'shortlisted' || applicationStatus === 'rejected' ? (
+                                  <span className={`text-xs font-semibold ${applicationStatus === 'shortlisted' ? 'text-blue-700' : 'text-red-600'}`}>
+                                    Candidate informed: {applicationStatus === 'shortlisted' ? 'Advanced' : 'Rejected'}
+                                  </span>
+                                ) : null}
+                                <button
+                                  onClick={() => handleInformCandidateDecision(r, 'advanced')}
+                                  disabled={!application?.id}
+                                  className="text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                >
+                                  Inform as Advanced
+                                </button>
+                                <button
+                                  onClick={() => handleInformCandidateDecision(r, 'rejected')}
+                                  disabled={!application?.id}
+                                  className="text-xs bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-2 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                >
+                                  Inform as Rejected
+                                </button>
+                              </div>
                             </td>
                             <td className="py-3 pr-3">
                               <span className={`inline-block text-xs font-semibold px-2.5 py-1 rounded-full ${rec.color}`}>{rec.label}</span>

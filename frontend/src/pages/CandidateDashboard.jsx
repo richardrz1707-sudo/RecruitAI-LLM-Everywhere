@@ -44,15 +44,17 @@ const NAV_ITEMS = [
 const STATUS_BADGE = {
   applied:     'bg-gray-100 text-gray-600',
   shortlisted: 'bg-blue-100 text-blue-700',
+  advanced:    'bg-blue-100 text-blue-700',
   invited:     'bg-teal-100 text-teal-700',
   rejected:    'bg-red-100 text-red-700',
 }
 
 const STATUS_LABEL = {
   applied:     'Applied',
-  shortlisted: 'Shortlisted',
+  shortlisted: 'Advanced to next stage',
+  advanced:    'Advanced to next stage',
   invited:     'Invited to screen',
-  rejected:    'Not selected',
+  rejected:    'Rejected',
 }
 
 const INVITE_BADGE = {
@@ -897,9 +899,18 @@ export default function CandidateDashboard() {
                   <tbody className="divide-y divide-gray-100">
                     {myApplications.map((app) => {
                       const jd = app.jd_posts || {}
-                      const statusLabel = app.screening_completed === true
-                        ? 'Completed screening'
-                        : app.display_status || STATUS_LABEL[app.status] || app.status
+                      const statusLabel =
+                        app.status === 'rejected'
+                          ? 'Rejected'
+                          : app.status === 'advanced' || app.status === 'shortlisted'
+                            ? 'Advanced to next stage'
+                            : app.screening_completed === true
+                              ? 'Screening completed'
+                              : app.status === 'invited'
+                                ? 'Invited to screen'
+                                : app.status === 'applied'
+                                  ? 'Applied'
+                                  : app.display_status || STATUS_LABEL[app.status] || app.status
                       return (
                         <tr key={app.id} className="hover:bg-gray-50 transition-colors">
                           <td className="px-5 py-3">

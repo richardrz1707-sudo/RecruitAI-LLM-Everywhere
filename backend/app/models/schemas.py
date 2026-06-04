@@ -191,7 +191,7 @@ class CreateApplicationRequest(BaseModel):
 
 class UpdateApplicationStatusRequest(BaseModel):
     application_id: str
-    status: Literal["applied", "shortlisted", "invited", "rejected"]
+    status: str
 
 
 # ── Screening invite ──────────────────────────────────────────────────────
