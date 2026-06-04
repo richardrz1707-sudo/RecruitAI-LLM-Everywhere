@@ -613,19 +613,109 @@ async def submit_answer(req: ScreeningAnswerRequest):
 
     current_question = questions[current_idx]
 
-    evaluation = await evaluate_answer(current_question, req.answer, req.is_followup)
+    # INTERVIEW GUARDRAIL: check answer safety before sending to evaluator.
+    # The interview continues; flagged candidates must re-answer this question.
+    from app.services.guardrails import check_interview_answer_safety
 
-    # Follow-up needed — store original answer in transcript, return early
-    if evaluation.get("needs_followup") and not req.is_followup:
-        fup_q = evaluation.get("follow_up_question", "")
+    safety = check_interview_answer_safety(
+        answer=req.answer,
+        question=current_question["question"],
+        candidate_id=str(session.get("candidate_profile_id") or ""),
+        session_id=req.session_id,
+    )
+
+    if not safety["safe"]:
+        flagged_entry = {
+            "question_index": current_idx,
+            "question": current_question["question"],
+            "dimension": current_question.get("dimension", ""),
+            "probes_skill": current_question.get("probes_skill", ""),
+            "answer": req.answer,
+            "is_followup": True,
+            "flagged_attempt": True,
+            "flagged": True,
+            "flag_type": safety["violation"],
+            "flag_reason": safety["reason"],
+            "integrity": {
+                "risk_level": "suspicious",
+                "flags": [{
+                    "type": safety["violation"],
+                    "detail": safety["reason"],
+                }],
+            },
+            # Keep role/content fields for safety log style consumers.
+            "role": "answer",
+            "content": req.answer,
+        }
+        supabase.table("screening_sessions").update({
+            "transcript_json": transcript_so_far + [flagged_entry],
+        }).eq("id", req.session_id).execute()
+
+        return {
+            "status": "continue",
+            "needs_followup": False,
+            "follow_up_question": None,
+            "next_question": {
+                "id": current_question["id"],
+                "question": current_question["question"],
+                "probes_skill": current_question.get("probes_skill", ""),
+                "question_number": current_idx + 1,
+                "total_questions": len(questions),
+            },
+            "current_index": current_idx,
+            "total_questions": len(questions),
+            "is_complete": False,
+            "flagged": True,
+            "flag_message": safety["candidate_message"],
+        }
+
+    # ── Count follow-ups for session context ────────────────────────────
+    followups_this_question = sum(
+        1 for e in transcript_so_far
+        if e.get("question_index") == current_idx and e.get("is_followup")
+    )
+    total_followups = sum(
+        1 for e in transcript_so_far if e.get("is_followup")
+    )
+
+    # ── Fetch JD for richer evaluation context ───────────────────────────
+    jd_data = supabase.table("jd_posts") \
+        .select("jd_text, parsed_json, title") \
+        .eq("id", jd_id).single().execute()
+    jd_text_eval = jd_data.data.get("jd_text", "") if jd_data.data else ""
+    parsed_jd_eval = jd_data.data.get("parsed_json") or {} if jd_data.data else {}
+
+    # ── Evaluate with Anthropic native tool use (Pillar 1) ────────────────
+    from app.services.screening_agent import evaluate_answer_with_tools
+    eval_result = evaluate_answer_with_tools(
+        question=current_question,
+        answer=req.answer,
+        jd_text=jd_text_eval,
+        parsed_jd=parsed_jd_eval,
+        resume_text=session.get("resume_text", ""),
+        is_followup=req.is_followup,
+        followups_used=total_followups,
+        followups_this_question=followups_this_question,
+        question_number=current_idx + 1,
+        total_turns=len(transcript_so_far)
+    )
+
+    tool_selected = eval_result["tool_selected"]
+
+    # ── Handle ask_followup_question ─────────────────────────────────────
+    if tool_selected == "ask_followup_question":
+        fup_q = eval_result.get("followup_question") or "Could you provide a more specific example?"
         transcript_entry = {
             "question_index": current_idx,
             "question": current_question["question"],
             "dimension": current_question.get("dimension", ""),
             "probes_skill": current_question.get("probes_skill", ""),
             "answer": req.answer,
-            "is_followup": False,
+            "is_followup": req.is_followup,
             "follow_up_question": fup_q,
+            "tool_selected": tool_selected,
+            "tool_reasoning": eval_result.get("reasoning", ""),
+            "followup_type": eval_result.get("followup_type"),
         }
         supabase.table("screening_sessions").update({
             "transcript_json": transcript_so_far + [transcript_entry],
@@ -638,6 +728,9 @@ async def submit_answer(req: ScreeningAnswerRequest):
             "current_index": current_idx,
             "total_questions": len(questions),
             "is_complete": False,
+            "tool_selected": tool_selected,
+            "followup_type": eval_result.get("followup_type"),
+            "agent_reasoning": eval_result.get("reasoning", ""),
         }
 
     # Integrity signals
@@ -650,11 +743,25 @@ async def submit_answer(req: ScreeningAnswerRequest):
 
     integrity_summary = compute_integrity_flags(
         signals=signals_dict,
-        ai_flag=evaluation.get("ai_generated_flag", False),
-        ai_confidence=evaluation.get("ai_confidence", "none"),
+        ai_flag=eval_result.get("ai_flag", False),
+        ai_confidence=eval_result.get("ai_confidence", "none"),
         answer=req.answer,
         response_time_ms=signals_dict.get("total_response_time_ms") if signals_dict else None,
     )
+    # Annotate integrity with tool decision for recruiter visibility
+    integrity_summary["tool_decision"] = tool_selected
+    integrity_summary["tool_reasoning"] = eval_result.get("reasoning", "")
+    previous_guard_flags = [
+        {
+            "type": entry.get("flag_type", "answer_safety"),
+            "detail": entry.get("flag_reason", "Previous answer attempt was flagged"),
+        }
+        for entry in transcript_so_far
+        if entry.get("question_index") == current_idx and entry.get("flagged")
+    ]
+    if previous_guard_flags:
+        integrity_summary["risk_level"] = "suspicious"
+        integrity_summary["flags"] = integrity_summary.get("flags", []) + previous_guard_flags
 
     # Speech metrics
     speech_metrics_dict = None
@@ -696,19 +803,34 @@ async def submit_answer(req: ScreeningAnswerRequest):
     updated_transcript = transcript_so_far + [transcript_entry]
 
     score_entry = {
-        "scores": evaluation["scores"],
-        "ai_generated_flag": evaluation.get("ai_generated_flag", False),
-        "ai_confidence": evaluation.get("ai_confidence", "none"),
+        "scores": eval_result["scores"],
+        "ai_generated_flag": eval_result.get("ai_flag", False),
+        "ai_confidence": eval_result.get("ai_confidence", "none"),
         "integrity_risk": integrity_summary["risk_level"],
         "integrity_flags": integrity_summary["flags"],
         "question_index": current_idx,
         "speech_metrics": speech_metrics_dict,
+        "tool_selected": tool_selected,
+        "tool_reasoning": eval_result.get("reasoning", ""),
+        "followup_type": eval_result.get("followup_type"),
     }
     updated_scores = scores_so_far + [score_entry]
+
+    # ── Route based on Claude's tool selection (Pillar 1) ─────────────────
+    # flag_and_continue: log integrity concern, advance to next question
+    # generate_final_report OR last question answered: finish session
+    # advance_to_next_question: move forward
+
+    # Treat flag_and_continue as advance for routing purposes
     new_idx = current_idx + 1
 
-    # All questions answered → generate final report
-    if new_idx >= len(questions):
+    # Generate report when: tool says so, OR all questions answered
+    should_complete = (
+        tool_selected == "generate_final_report" or
+        (tool_selected in ("advance_to_next_question", "flag_and_continue") and new_idx >= len(questions))
+    )
+
+    if should_complete:
         jd_info = (
             supabase.table("jd_posts").select("title").eq("id", jd_id).execute()
         )
@@ -792,6 +914,9 @@ async def submit_answer(req: ScreeningAnswerRequest):
         "current_index": new_idx,
         "total_questions": len(questions),
         "is_complete": False,
+        "tool_selected": tool_selected,
+        "integrity_flagged": tool_selected == "flag_and_continue",
+        "agent_reasoning": eval_result.get("reasoning", ""),
     }
 
 

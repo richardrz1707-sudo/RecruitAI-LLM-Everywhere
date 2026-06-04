@@ -6,6 +6,10 @@ from app.services.utils import (
 )
 from app.database import supabase
 
+# Bump this when the question generation prompt changes significantly.
+# Old cached questions (different version) will be regenerated automatically.
+QUESTION_CACHE_VERSION = "v2"
+
 FALLBACK_QUESTIONS = [
     {
         "id": 1,
@@ -53,6 +57,13 @@ Question structure (follow this order):
 - Q3: soft skill probe — identify the most important soft skill the JD needs. Find evidence or absence in the resume and probe it directly with a behavioural question.
 - Q4: gap question — identify one clear gap between JD requirements and resume. Ask about it honestly and directly.
 - Q5: motivation and trajectory — connect their career story from the resume to this specific role.
+
+Required tailoring rules (must follow):
+- Q1: Reference something specific from the candidate resume - a role, project, or achievement. Make it personal to this candidate.
+- Q2: Identify the most critical technical skill in the JD. Check if the resume shows evidence. If strong evidence: probe depth. If weak or missing: ask them to demonstrate it.
+- Q3: Identify the most important soft skill the JD needs. Find evidence or absence in the resume. Ask a behavioural question.
+- Q4: Identify ONE clear gap between JD requirements and resume. Ask about it honestly and directly.
+- Q5: Connect their career trajectory from the resume to this specific role.
 
 For each question provide:
 - dimension: english_proficiency | answer_quality | soft_skills | job_fit
@@ -126,30 +137,98 @@ hire_recommendation guide: strong_yes>=80, yes>=65, maybe>=50, no<50"""
 async def generate_questions(jd_text: str, resume_text: str = "") -> list:
     """
     Generate 5 speech interview questions tailored to both the JD and the
-    candidate resume. JD truncated to JD_MAX_CHARS, resume to RESUME_MAX_CHARS.
+    candidate resume. Uses 900 tokens to avoid truncated JSON. Falls back
+    to salvaging partial questions or FALLBACK_QUESTIONS.
     """
-    resume_section = (
-        f"\nCandidate resume (truncated):\n{truncate_resume(resume_text)}"
-        if resume_text.strip()
-        else "\nNo resume provided — base questions on JD only."
-    )
+    import json as _json, re as _re
+
     user_message = (
-        f"Job description (truncated):\n{truncate_jd(jd_text)}"
-        f"{resume_section}"
+        f"Job description:\n{jd_text[:1000]}\n\n"
+        f"Candidate resume:\n{resume_text[:1500]}"
+        if resume_text.strip()
+        else
+        f"Job description:\n{jd_text[:1000]}\n\n"
+        f"No resume provided — generate role-specific "
+        f"questions based on JD requirements only."
     )
     messages = [{"role": "user", "content": user_message}]
+
+    # Prepend conciseness instruction so questions don't balloon token usage
+    concise_prompt = (
+        _QUESTION_SYSTEM_PROMPT +
+        "\n\nIMPORTANT: Keep each question under 50 words. "
+        "Be specific but concise. Do not write long preambles. "
+        "Start the question directly."
+    )
+
     try:
         result = await call_claude(
-            _QUESTION_SYSTEM_PROMPT, messages,
-            max_tokens=MAX_TOKENS["question_gen"], model="claude-haiku-4-5-20251001",
+            concise_prompt, messages,
+            max_tokens=900,  # raised from 500 — tailored questions are longer
+            model="claude-haiku-4-5-20251001",
         )
-        parsed = safe_json_parse(result, fallback={})
-        questions = parsed.get("questions", [])
-        if len(questions) == 5 and all("probes_skill" in q for q in questions):
-            return questions
+
+        raw = result.strip() if result else ""
+        clean = raw.replace("```json", "").replace("```", "").strip()
+
+        # ── Attempt 1: parse complete JSON ──────────────────────────────
+        start = clean.find("{")
+        if start != -1:
+            end = clean.rfind("}") + 1
+            if end > start:
+                try:
+                    parsed = _json.loads(clean[start:end])
+                    questions = parsed.get("questions", [])
+                    if len(questions) >= 3:
+                        # Accept ≥3 complete questions; fill rest with fallbacks
+                        while len(questions) < 5:
+                            questions.append(FALLBACK_QUESTIONS[len(questions)])
+                        print(f"[questions] Parsed {len(questions)} questions OK")
+                        return questions[:5]
+                except _json.JSONDecodeError as je:
+                    print(f"[questions] JSON parse error: {je}")
+
+        # ── Attempt 2: salvage complete question objects from truncated JSON
+        q_pattern = _re.compile(
+            r'\{\s*"id"\s*:\s*(\d+)\s*,[^{}]*'
+            r'"question"\s*:\s*"([^"]+)"\s*,[^{}]*'
+            r'"dimension"\s*:\s*"([^"]+)"[^{}]*\}',
+            _re.DOTALL
+        )
+        salvaged = []
+        for match in q_pattern.finditer(clean):
+            try:
+                salvaged.append({
+                    "id": int(match.group(1)),
+                    "question": match.group(2),
+                    "dimension": match.group(3),
+                    "strong_answer_hint": "",
+                    "probes_skill": "general"
+                })
+            except Exception:
+                continue
+
+        if len(salvaged) >= 3:
+            print(f"[questions] Salvaged {len(salvaged)} questions from truncated response")
+            while len(salvaged) < 5:
+                salvaged.append(FALLBACK_QUESTIONS[len(salvaged)])
+            return salvaged[:5]
+
+        print("[questions] Could not parse response — using fallback questions")
+
     except Exception as e:
         print(f"[questions] Generation error: {e}")
+
     return FALLBACK_QUESTIONS
+
+
+def log_question_tailoring(candidate_id: str | None, jd_id: str, resume_text: str, from_cache: bool, questions: list) -> None:
+    print("Questions generated:")
+    print(f"  candidate_id: {candidate_id}")
+    print(f"  jd_id: {jd_id}")
+    print(f"  has_resume: {bool(resume_text.strip())}")
+    print(f"  from_cache: {from_cache}")
+    print(f"  Q1 preview: {questions[0]['question'][:80]}")
 
 
 async def get_or_create_questions(
@@ -162,7 +241,7 @@ async def get_or_create_questions(
     Cache key is (candidate_id, jd_id) for resume-personalised questions.
     candidate_id=None means generic questions for the JD (no resume provided).
     """
-    print(f"[questions] Checking cache jd_id={jd_id} candidate_id={candidate_id}")
+    print(f"[questions] Checking cache jd_id={jd_id} candidate_id={candidate_id} version={QUESTION_CACHE_VERSION}")
     try:
         if candidate_id:
             cached = (
@@ -170,6 +249,7 @@ async def get_or_create_questions(
                 .select("questions_json")
                 .eq("candidate_id", candidate_id)
                 .eq("jd_id", jd_id)
+                .eq("prompt_version", QUESTION_CACHE_VERSION)
                 .limit(1)
                 .execute()
             )
@@ -179,12 +259,15 @@ async def get_or_create_questions(
                 .select("questions_json")
                 .eq("jd_id", jd_id)
                 .is_("candidate_id", "null")
+                .eq("prompt_version", QUESTION_CACHE_VERSION)
                 .limit(1)
                 .execute()
             )
         if cached.data:
             print("[questions] Cache HIT — no Claude call needed")
-            return cached.data[0]["questions_json"], True
+            questions = cached.data[0]["questions_json"]
+            log_question_tailoring(candidate_id, jd_id, resume_text, True, questions)
+            return questions, True
     except Exception as e:
         print(f"[questions] Cache lookup error: {e}")
 
@@ -195,10 +278,348 @@ async def get_or_create_questions(
             "jd_id": jd_id,
             "candidate_id": candidate_id,
             "questions_json": questions,
+            "prompt_version": QUESTION_CACHE_VERSION,
         }).execute()
     except Exception as e:
         print(f"[questions] Cache save error: {e}")
+    log_question_tailoring(candidate_id, jd_id, resume_text, False, questions)
     return questions, False
+
+
+INTERVIEW_TOOLS = [
+    {
+        "name": "ask_followup_question",
+        "description": (
+            "Ask a follow-up question when the candidate's answer needs more depth. "
+            "Use when: answer is too vague, lacks a specific example, or misses a key "
+            "JD requirement. Maximum 2 follow-ups per question, 6 total per session."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "The specific follow-up question. Must reference either the "
+                        "candidate's actual words OR a specific JD requirement. Never generic."
+                    )
+                },
+                "followup_type": {
+                    "type": "string",
+                    "enum": ["probe_answer", "bridge_to_jd"],
+                    "description": (
+                        "probe_answer: candidate gave a vague answer that needs depth. "
+                        "bridge_to_jd: answer missed a specific JD requirement."
+                    )
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "Why this follow-up is needed — what was missing from the answer."
+                },
+                "scores": {
+                    "type": "object",
+                    "description": (
+                        "Dimension scores for this answer 0-100 each: "
+                        "english_proficiency, answer_quality, soft_skills, job_fit"
+                    )
+                }
+            },
+            "required": ["question", "followup_type", "reasoning", "scores"]
+        }
+    },
+    {
+        "name": "advance_to_next_question",
+        "description": (
+            "Move to the next interview question when the current answer is satisfactory. "
+            "Use when answer demonstrates the skill being probed with specific evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reasoning": {
+                    "type": "string",
+                    "description": "Why the answer was sufficient — what evidence was provided."
+                },
+                "scores": {
+                    "type": "object",
+                    "description": (
+                        "Dimension scores 0-100 each: english_proficiency, "
+                        "answer_quality, soft_skills, job_fit"
+                    )
+                }
+            },
+            "required": ["reasoning", "scores"]
+        }
+    },
+    {
+        "name": "generate_final_report",
+        "description": (
+            "End the interview and generate the final hiring report. "
+            "Use when: all 5 questions are answered, OR turn limit is reached."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reasoning": {"type": "string", "description": "Why the session is complete."},
+                "scores": {"type": "object", "description": "Final answer dimension scores."}
+            },
+            "required": ["reasoning", "scores"]
+        }
+    },
+    {
+        "name": "flag_and_continue",
+        "description": (
+            "Flag an integrity concern and continue to the next question. "
+            "Use when answer appears AI-generated or heavily scripted. "
+            "Do NOT use for short or vague answers — use ask_followup_question instead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "flag_type": {
+                    "type": "string",
+                    "enum": ["ai_generated", "scripted_response"]
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "What signals indicate AI generation or scripting."
+                },
+                "scores": {"type": "object", "description": "Dimension scores."}
+            },
+            "required": ["flag_type", "reasoning", "scores"]
+        }
+    }
+]
+
+
+def get_interview_system_prompt(
+    jd_title: str,
+    required_skills: list,
+    seniority: str
+) -> str:
+    skills_str = ", ".join(required_skills[:6]) if required_skills else "not specified"
+    return f"""You are an expert technical interviewer evaluating a candidate for {jd_title}.
+
+Role requirements:
+- Required skills: {skills_str}
+- Seniority: {seniority or 'not specified'}
+
+After reading the candidate's answer, select exactly ONE tool:
+
+TOOL SELECTION RULES:
+- Answer is vague, generic, or lacks example → ask_followup_question (type: probe_answer)
+- Answer misses a specific JD requirement → ask_followup_question (type: bridge_to_jd)
+- Answer demonstrates the skill with evidence → advance_to_next_question
+- All questions answered or turn limit reached → generate_final_report
+- Answer reads like AI-generated text → flag_and_continue
+
+SCORING RULES (0-100 per dimension):
+english_proficiency: clarity, vocabulary, fluency
+answer_quality: structure, specificity, evidence
+soft_skills: leadership, teamwork, self-awareness
+job_fit: relevance to role requirements
+
+FOLLOW-UP QUESTION RULES:
+- probe_answer: reference the candidate's exact words and ask for more depth
+  e.g. "You mentioned [X] — can you walk me through [specific aspect]?"
+- bridge_to_jd: reference the JD requirement that was missed
+  e.g. "This role requires [requirement] — can you speak to your experience with that?"
+
+FOLLOW-UP QUESTION TEMPLATES:
+
+For probe_answer — use this structure:
+"You mentioned [exact phrase from answer] — can you [specific deeper question about it]?"
+
+Example: "You mentioned leading a team — how large was the team and what was your specific decision-making authority?"
+
+For bridge_to_jd — use this structure:
+"This role requires [specific JD requirement] — can you [speak to / walk me through / describe] your experience with that specifically?"
+
+Example: "This role requires Python for ML pipelines — your answer focused on R. Can you describe any Python projects you have worked on?"
+
+Always quote either the candidate's words OR a specific JD requirement. Never ask "Can you tell me more?" or "Can you elaborate?"""
+
+
+def evaluate_answer_with_tools(
+    question: dict,
+    answer: str,
+    jd_text: str = "",
+    parsed_jd: dict = None,
+    resume_text: str = "",
+    is_followup: bool = False,
+    followups_used: int = 0,
+    followups_this_question: int = 0,
+    question_number: int = 1,
+    total_turns: int = 0
+) -> dict:
+    """
+    Evaluates a candidate's answer using Anthropic native tool use.
+    Claude selects the tool — Python executes it.
+
+    This satisfies Pillar 1: LLM decides routing, not Python if/else logic.
+    """
+    from app.config import settings
+    import anthropic as ant
+
+    ant_client = ant.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+    _default_scores = {
+        "english_proficiency": 50,
+        "answer_quality": 50,
+        "soft_skills": 50,
+        "job_fit": 50
+    }
+
+    # Force complete if session limits reached
+    force_complete = (
+        followups_used >= 6 or
+        total_turns >= 17 or
+        (question_number >= 5 and not is_followup)
+    )
+    if force_complete and question_number >= 5:
+        return {
+            "tool_selected": "generate_final_report",
+            "tool_input": {"reasoning": "Session limits reached", "scores": _default_scores},
+            "scores": _default_scores,
+            "reasoning": "Session limits reached",
+            "followup_type": None,
+            "followup_question": None,
+            "ai_flag": False,
+            "ai_confidence": "none"
+        }
+
+    parsed = parsed_jd or {}
+    system_prompt = get_interview_system_prompt(
+        jd_title=parsed.get("role_title", "this role"),
+        required_skills=parsed.get("required_skills", []),
+        seniority=parsed.get("seniority_level", "")
+    )
+
+    followup_limit_note = ""
+    if followups_this_question >= 2:
+        followup_limit_note = (
+            "\nNOTE: This question has used its maximum follow-ups. "
+            "You MUST select advance_to_next_question or generate_final_report."
+        )
+    elif followups_used >= 5:
+        followup_limit_note = (
+            "\nNOTE: Only 1 follow-up remaining for the entire session. Use it wisely."
+        )
+
+    # Build structured JD requirements context for anchored follow-ups
+    jd_requirements = ""
+    if parsed:
+        required = parsed.get("required_skills", [])[:6]
+        nice = parsed.get("nice_to_have", [])[:3]
+        min_exp = parsed.get("min_years_experience", "")
+        key_resp = parsed.get("key_responsibilities", [])[:3]
+
+        jd_requirements = (
+            f"\nJD requirements for follow-up context:\n"
+            f"Required skills: {', '.join(required)}\n"
+        ) if required else ""
+        if nice:
+            jd_requirements += f"Nice to have: {', '.join(nice)}\n"
+        if min_exp:
+            jd_requirements += f"Min experience: {min_exp}\n"
+        if key_resp:
+            jd_requirements += f"Key responsibilities: {'; '.join(key_resp)}\n"
+
+    # Resume highlights so Claude can anchor bridge_to_jd follow-ups
+    resume_context = ""
+    if resume_text and len(resume_text.strip()) > 50:
+        resume_context = (
+            f"\nCandidate resume highlights (first 600 chars):\n"
+            f"{resume_text[:600]}"
+        )
+
+    user_message = (
+        f"Question being evaluated:\n{question['question']}\n\n"
+        f"Skill being probed: {question.get('probes_skill', 'general')}\n"
+        f"Expected in strong answer: {question.get('strong_answer_hint', '')}\n"
+        f"{jd_requirements}"
+        f"{resume_context}\n\n"
+        f"Candidate answer:\n{answer[:500]}\n\n"
+        f"Context:\n"
+        f"- Question {question_number} of 5\n"
+        f"- Is this a follow-up: {is_followup}\n"
+        f"- Follow-ups used this question: {followups_this_question}/2\n"
+        f"- Total follow-ups used: {followups_used}/6\n"
+        f"- Total turns: {total_turns}/17"
+        f"{followup_limit_note}"
+    )
+
+    # Remove ask_followup_question when limits are reached
+    available_tools = INTERVIEW_TOOLS
+    if followups_this_question >= 2 or followups_used >= 6:
+        available_tools = [
+            t for t in INTERVIEW_TOOLS if t["name"] != "ask_followup_question"
+        ]
+
+    try:
+        response = ant_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            system=system_prompt,
+            tools=available_tools,
+            tool_choice={"type": "any"},
+            messages=[{"role": "user", "content": user_message}],
+            timeout=20.0
+        )
+
+        tool_block = next(
+            (b for b in response.content if hasattr(b, "type") and b.type == "tool_use"),
+            None
+        )
+
+        if not tool_block:
+            return _fallback_evaluation(answer)
+
+        tool_name = tool_block.name
+        tool_input = tool_block.input
+        scores = tool_input.get("scores", _default_scores)
+
+        print(f"[Interview Agent] Tool selected: {tool_name}")
+        print(f"[Interview Agent] Reasoning: {tool_input.get('reasoning', '')[:100]}")
+
+        return {
+            "tool_selected": tool_name,
+            "tool_input": tool_input,
+            "scores": scores,
+            "reasoning": tool_input.get("reasoning", ""),
+            "followup_type": tool_input.get("followup_type"),
+            "followup_question": (
+                tool_input.get("question")
+                if tool_name == "ask_followup_question" else None
+            ),
+            "ai_flag": tool_name == "flag_and_continue",
+            "ai_confidence": "high" if tool_name == "flag_and_continue" else "none"
+        }
+
+    except Exception as e:
+        import traceback
+        print(f"[Interview Agent] Error: {e}")
+        print(traceback.format_exc())
+        return _fallback_evaluation(answer)
+
+
+def _fallback_evaluation(answer: str) -> dict:
+    """Fallback when tool use fails. Advances the interview safely."""
+    word_count = len(answer.split())
+    needs_fup = word_count < 30
+    return {
+        "tool_selected": "ask_followup_question" if needs_fup else "advance_to_next_question",
+        "tool_input": {
+            "reasoning": "Fallback evaluation",
+            "scores": {"english_proficiency": 50, "answer_quality": 50, "soft_skills": 50, "job_fit": 50}
+        },
+        "scores": {"english_proficiency": 50, "answer_quality": 50, "soft_skills": 50, "job_fit": 50},
+        "reasoning": "Fallback evaluation",
+        "followup_type": None,
+        "followup_question": "Could you give a more specific example?" if needs_fup else None,
+        "ai_flag": False,
+        "ai_confidence": "none"
+    }
 
 
 async def evaluate_answer(question: dict, answer: str, is_followup: bool) -> dict:

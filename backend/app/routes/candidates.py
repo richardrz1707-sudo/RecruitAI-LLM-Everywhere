@@ -260,15 +260,7 @@ async def upload_my_resume(
         )
         candidate_id = result.data[0]["id"]
 
-    # Record in upload history (best-effort)
-    try:
-        supabase.table("candidate_resume_uploads").insert({
-            "candidate_id": candidate_id,
-            "filename": resume.filename or "unknown",
-            "resume_url": resume_url,
-        }).execute()
-    except Exception as e:
-        print(f"[upload_my_resume] Failed to record upload history: {e}")
+    # Upload history is read from resume_analyses — no separate insert needed
 
     return {
         "candidate_id": candidate_id,
@@ -626,87 +618,115 @@ async def refresh_my_invite_token(
     invite_id: str,
     profile_id: str = Depends(get_current_user_id),
 ):
-    db = supabase
-    candidate_ids: set = set()
-    profile = (
-        db.table("profiles")
-        .select("email")
-        .eq("id", profile_id)
-        .single()
-        .execute()
-    )
-    email = ((profile.data or {}).get("email") or "").lower().strip()
-
-    by_profile = (
-        db.table("candidates")
-        .select("id")
-        .eq("profile_id", profile_id)
-        .execute()
-    )
-    for candidate in by_profile.data or []:
-        candidate_ids.add(candidate["id"])
-
-    if email:
-        by_email = (
-            db.table("candidates")
-            .select("id")
-            .eq("email", email)
+    try:
+        db = supabase
+        candidate_ids: set = set()
+        profile = (
+            db.table("profiles")
+            .select("email")
+            .eq("id", profile_id)
+            .single()
             .execute()
         )
-        for candidate in by_email.data or []:
+        email = ((profile.data or {}).get("email") or "").lower().strip()
+
+        by_profile = (
+            db.table("candidates")
+            .select("id")
+            .eq("profile_id", profile_id)
+            .execute()
+        )
+        for candidate in by_profile.data or []:
             candidate_ids.add(candidate["id"])
 
-    if not candidate_ids:
-        raise HTTPException(status_code=404, detail="Invite not found")
+        if email:
+            by_email = (
+                db.table("candidates")
+                .select("id")
+                .eq("email", email)
+                .execute()
+            )
+            for candidate in by_email.data or []:
+                candidate_ids.add(candidate["id"])
 
-    invite = (
-        db.table("screening_invites")
-        .select("id, candidate_id, status")
-        .eq("id", invite_id)
-        .in_("candidate_id", list(candidate_ids))
-        .limit(1)
-        .execute()
-    )
-    if not invite.data:
-        raise HTTPException(status_code=404, detail="Invite not found")
-    if invite.data[0].get("status") == "completed":
-        raise HTTPException(status_code=409, detail="Screening already completed")
+        if not candidate_ids:
+            raise HTTPException(status_code=404, detail="Invite not found")
 
-    token = secrets.token_urlsafe(16)
-    updated = (
-        db.table("screening_invites")
-        .update({"token": token, "status": "pending"})
-        .eq("id", invite_id)
-        .execute()
-    )
-    if not updated.data:
-        raise HTTPException(status_code=500, detail="Failed to refresh invite")
-    return {"token": token, "screening_url": f"/screen/{token}", "status": "pending"}
+        invite = (
+            db.table("screening_invites")
+            .select("id, candidate_id, status, token")
+            .eq("id", invite_id)
+            .in_("candidate_id", list(candidate_ids))
+            .limit(1)
+            .execute()
+        )
+        if not invite.data:
+            raise HTTPException(status_code=404, detail="Invite not found")
+        if invite.data[0].get("status") == "completed":
+            raise HTTPException(status_code=409, detail="Screening already completed")
+
+        token = secrets.token_urlsafe(16)
+        updated = (
+            db.table("screening_invites")
+            .update({"token": token, "status": "pending"})
+            .eq("id", invite_id)
+            .execute()
+        )
+        if not updated.data:
+            raise HTTPException(status_code=500, detail="Failed to refresh invite")
+        return {"token": token, "screening_url": f"/screen/{token}", "status": "pending"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"[refresh-token] ERROR: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/upload-history")
 async def get_upload_history(
-    profile_id: str = Depends(get_current_user_id),
+    client=Depends(get_authed_client),
 ):
-    """Returns the candidate's resume upload history, newest first."""
-    candidate = (
-        supabase.table("candidates")
-        .select("id")
-        .eq("profile_id", profile_id)
-        .limit(1)
-        .execute()
-    )
-    if not candidate.data:
-        return {"uploads": []}
+    """Returns the candidate's resume analysis history from resume_analyses table."""
+    try:
+        user = client.auth.get_user()
+        profile_id = user.user.id
 
-    result = (
-        supabase.table("candidate_resume_uploads")
-        .select("id, filename, resume_url, uploaded_at")
-        .eq("candidate_id", candidate.data[0]["id"])
-        .order("uploaded_at", desc=True)
-        .execute()
-    )
-    return {"uploads": result.data or []}
+        candidate = (
+            supabase.table("candidates")
+            .select("id")
+            .eq("profile_id", profile_id)
+            .limit(1)
+            .execute()
+        )
+        if not candidate.data:
+            return {"uploads": []}
+
+        result = (
+            supabase.table("resume_analyses")
+            .select("id, created_at, version, scorecard_json")
+            .eq("candidate_id", candidate.data[0]["id"])
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+
+        uploads = [
+            {
+                "id": r["id"],
+                "date": r["created_at"][:10],
+                "version": r.get("version", 1),
+                "grade": (r.get("scorecard_json") or {}).get("overall_grade", "N/A"),
+            }
+            for r in (result.data or [])
+        ]
+        return {"uploads": uploads}
+
+    except Exception as e:
+        print(f"[upload-history] Error: {e}")
+        return {"uploads": []}
 
 
 # ── Parameterised route — must stay last ─────────────────────────────────────
