@@ -12,7 +12,7 @@ from app.services.matching import (
     calculate_weighted_score,
 )
 from app.services.utils import truncate_resume, get_cached_match_score
-from app.models.schemas import CandidateProfileUpdate, CreateApplicationRequest
+from app.models.schemas import CandidateProfileUpdate, CreateApplicationRequest, CandidateJobMatchRequest
 
 router = APIRouter()
 
@@ -304,6 +304,120 @@ async def get_open_jds(
 
     return {"jds": jds, "count": len(jds)}
 
+
+
+@router.post("/match-jobs")
+async def match_candidate_jobs(
+    request: CandidateJobMatchRequest,
+    profile_id: str = Depends(get_current_user_id),
+):
+    """Scores the signed-in candidate against selected open jobs without applying."""
+    jd_ids = list(dict.fromkeys([jd_id for jd_id in request.jd_ids if jd_id]))
+    if not jd_ids:
+        raise HTTPException(status_code=400, detail="Please select at least one job")
+
+    candidate_row = (
+        supabase.table("candidates")
+        .select("id, name, resume_text")
+        .eq("profile_id", profile_id)
+        .limit(1)
+        .execute()
+    )
+    if not candidate_row.data:
+        raise HTTPException(status_code=400, detail="Please upload your resume to your profile first")
+
+    candidate = candidate_row.data[0]
+    candidate_id = candidate["id"]
+    resume_text = candidate.get("resume_text") or ""
+    if not resume_text.strip():
+        raise HTTPException(status_code=400, detail="Please upload a resume with readable text first")
+
+    jd_resp = (
+        supabase.table("jd_posts")
+        .select("id, title, department, location, jd_text, parsed_json")
+        .in_("id", jd_ids)
+        .eq("visibility", "open")
+        .not_.eq("status", "archived")
+        .execute()
+    )
+    jd_rows = jd_resp.data or []
+    if not jd_rows:
+        raise HTTPException(status_code=404, detail="No selected open jobs found")
+
+    results = []
+    for jd in jd_rows:
+        jd_id = jd["id"]
+        cached = None if request.force_refresh else get_cached_match_score(candidate_id, jd_id)
+        cached_score = cached.get("total_score", 0) if cached else 0
+        cached_json = cached.get("score_json", {}) if cached else {}
+
+        if _is_real_ai_match(cached_json, cached_score):
+            match_json = cached_json
+            match_score = cached_score
+            from_cache = True
+        else:
+            parsed_jd = jd.get("parsed_json") or {}
+            if not parsed_jd:
+                parsed_jd = await parse_jd(jd.get("jd_text", ""))
+                if parsed_jd:
+                    supabase.table("jd_posts").update({"parsed_json": parsed_jd}).eq("id", jd_id).execute()
+
+            match_json = await score_candidate(
+                resume_text=truncate_resume(resume_text),
+                parsed_jd=parsed_jd,
+                candidate_name=candidate.get("name", ""),
+                candidate_id=candidate_id,
+                jd_id=jd_id,
+                force_refresh=request.force_refresh,
+            )
+            match_score = calculate_weighted_score(match_json)
+            if match_score <= 0 or "Unable to score" in match_json.get("overall_summary", ""):
+                match_json = fallback_score_candidate(
+                    resume_text=truncate_resume(resume_text),
+                    jd_text=jd.get("jd_text", ""),
+                    parsed_jd=parsed_jd,
+                )
+                match_score = calculate_weighted_score(match_json)
+
+            if _is_real_ai_match(match_json, match_score):
+                existing_score = (
+                    supabase.table("match_scores")
+                    .select("id")
+                    .eq("candidate_id", candidate_id)
+                    .eq("jd_id", jd_id)
+                    .limit(1)
+                    .execute()
+                )
+                if existing_score.data:
+                    supabase.table("match_scores").update({
+                        "score_json": match_json,
+                        "total_score": match_score,
+                    }).eq("id", existing_score.data[0]["id"]).execute()
+                else:
+                    supabase.table("match_scores").insert({
+                        "candidate_id": candidate_id,
+                        "jd_id": jd_id,
+                        "score_json": match_json,
+                        "total_score": match_score,
+                    }).execute()
+            from_cache = False
+
+        hard_skills = match_json.get("hard_skills_match") or {}
+        results.append({
+            "jd_id": jd_id,
+            "title": jd.get("title", ""),
+            "department": jd.get("department", ""),
+            "location": jd.get("location", ""),
+            "total_score": match_score,
+            "overall_summary": match_json.get("why_this_person") or match_json.get("overall_summary", ""),
+            "matched_skills": hard_skills.get("matched", []),
+            "missing_skills": hard_skills.get("gaps", []),
+            "recommendation": match_json.get("recommendation", "weak_match"),
+            "score_json": match_json,
+            "from_cache": from_cache,
+        })
+
+    return {"success": True, "data": {"results": results}, "message": f"Matched {len(results)} jobs"}
 
 @router.post("/apply")
 async def apply_to_jd(

@@ -243,6 +243,10 @@ export const getResumeUploadHistory = () =>
 export const getJdPool = () =>
   api.get('/candidates/jd-pool')
 
+export function matchCandidateJobs(jdIds, forceRefresh = false) {
+  return api.post('/candidates/match-jobs', { jd_ids: jdIds, force_refresh: forceRefresh })
+}
+
 export const applyToJd = (jdId, coverNote = '', resumeText = '', resumeFilename = '') =>
   api.post('/candidates/apply', {
     jd_id: jdId,

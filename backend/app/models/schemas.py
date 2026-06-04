@@ -178,6 +178,11 @@ class CandidateProfileUpdate(BaseModel):
 
 # ── JD Application ────────────────────────────────────────────────────────
 
+class CandidateJobMatchRequest(BaseModel):
+    jd_ids: List[str]
+    force_refresh: bool = False
+
+
 class CreateApplicationRequest(BaseModel):
     jd_id: str
     resume_text: str = ""

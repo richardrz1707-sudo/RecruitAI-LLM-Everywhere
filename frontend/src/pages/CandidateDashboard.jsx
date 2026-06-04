@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   getCandidateProfile, uploadMyResume, getJdPool, applyToJd,
   getMyApplications, getMyInvites, refreshMyInviteToken, parseResumeOnly, getResumeUploadHistory,
-  getPublicJDList, analyseResume, getAnalysisHistory, getSessionsByEmail,
+  getPublicJDList, analyseResume, getAnalysisHistory, getSessionsByEmail, matchCandidateJobs,
   getMyFeedbackHistory, getFeedbackHistoryByEmail,
 } from '../lib/api'
 import { useAuthStore } from '../lib/auth'
@@ -92,6 +92,13 @@ export default function CandidateDashboard() {
   const [jdPool, setJdPool]             = useState([])
   const [loadingPool, setLoadingPool]   = useState(true)
   const [jobSearch, setJobSearch]       = useState('')
+  const [departmentFilter, setDepartmentFilter] = useState('')
+  const [locationFilter, setLocationFilter] = useState('')
+  const [minMatchScore, setMinMatchScore] = useState('')
+  const [selectedJobIds, setSelectedJobIds] = useState(() => new Set())
+  const [matchingJobs, setMatchingJobs] = useState(false)
+  const [jobMatchResults, setJobMatchResults] = useState({})
+  const [jobMatchError, setJobMatchError] = useState('')
   const [applyModal, setApplyModal]     = useState(null)   // jd object | null
   const [coverNote, setCoverNote]       = useState('')
   const [applying, setApplying]         = useState(false)
@@ -393,13 +400,85 @@ export default function CandidateDashboard() {
   const pendingInvites = invites.filter((i) => i.status === 'pending').length
   const appliedJdIds   = useMemo(() => new Set(myApplications.map((a) => a.jd_id)), [myApplications])
 
+  const departmentOptions = useMemo(
+    () => Array.from(new Set(jdPool.map((j) => j.department).filter(Boolean))).sort(),
+    [jdPool],
+  )
+  const locationOptions = useMemo(
+    () => Array.from(new Set(jdPool.map((j) => j.location).filter(Boolean))).sort(),
+    [jdPool],
+  )
+
   const filteredJds = useMemo(() => {
-    if (!jobSearch.trim()) return jdPool
-    const q = jobSearch.toLowerCase()
-    return jdPool.filter(
-      (j) => j.title?.toLowerCase().includes(q) || j.department?.toLowerCase().includes(q)
-    )
-  }, [jdPool, jobSearch])
+    const q = jobSearch.trim().toLowerCase()
+    const minScore = Number(minMatchScore) || 0
+    return jdPool.filter((j) => {
+      const myApp = myApplications.find((a) => a.jd_id === j.id)
+      const score = jobMatchResults[j.id]?.total_score ?? myApp?.match_score ?? null
+      const matchesSearch = !q ||
+        j.title?.toLowerCase().includes(q) ||
+        j.department?.toLowerCase().includes(q) ||
+        j.location?.toLowerCase().includes(q)
+      const matchesDepartment = !departmentFilter || j.department === departmentFilter
+      const matchesLocation = !locationFilter || j.location === locationFilter
+      const matchesScore = minScore <= 0 || (score != null && Number(score) >= minScore)
+      return matchesSearch && matchesDepartment && matchesLocation && matchesScore
+    })
+  }, [jdPool, jobSearch, departmentFilter, locationFilter, minMatchScore, jobMatchResults, myApplications])
+
+  const selectedFilteredJobIds = useMemo(
+    () => filteredJds.map((j) => j.id).filter((id) => selectedJobIds.has(id)),
+    [filteredJds, selectedJobIds],
+  )
+
+  const handleToggleJobSelection = (jdId) => {
+    setSelectedJobIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(jdId)) next.delete(jdId)
+      else next.add(jdId)
+      return next
+    })
+  }
+
+  const handleSelectAllFilteredJobs = () => {
+    setSelectedJobIds((prev) => {
+      const next = new Set(prev)
+      filteredJds.forEach((jd) => next.add(jd.id))
+      return next
+    })
+  }
+
+  const handleClearSelectedJobs = () => {
+    setSelectedJobIds(new Set())
+  }
+
+  const handleCalculateJobMatches = async () => {
+    const jdIds = Array.from(selectedJobIds)
+    if (!candidate) {
+      setJobMatchError('Upload your resume in My Profile before calculating match scores.')
+      return
+    }
+    if (jdIds.length === 0) {
+      setJobMatchError('Select at least one job to calculate match scores.')
+      return
+    }
+    setMatchingJobs(true)
+    setJobMatchError('')
+    try {
+      const r = await matchCandidateJobs(jdIds)
+      const results = r.data?.data?.results || []
+      setJobMatchResults((prev) => {
+        const next = { ...prev }
+        results.forEach((item) => { next[item.jd_id] = item })
+        return next
+      })
+      toast.success(`Calculated match scores for ${results.length} job${results.length === 1 ? '' : 's'}`)
+    } catch (err) {
+      setJobMatchError(err.response?.data?.detail || 'Unable to calculate match scores right now.')
+    } finally {
+      setMatchingJobs(false)
+    }
+  }
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -680,81 +759,92 @@ export default function CandidateDashboard() {
 
         {/* ══ BROWSE JOBS ══ */}
         {activeTab === 'browse' && (
-          <div className="max-w-4xl mx-auto px-6 py-10 space-y-6">
-            <div className="flex items-center justify-between gap-4 flex-wrap">
-              <div>
-                <h1 className="text-2xl font-bold text-gray-900">Browse Jobs</h1>
-                <p className="text-sm text-gray-500 mt-1">Open roles you can apply to directly.</p>
+          <div className="max-w-5xl mx-auto px-6 py-10 space-y-6">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div>
+                  <h1 className="text-2xl font-bold text-gray-900">Browse Jobs</h1>
+                  <p className="text-sm text-gray-500 mt-1">Open roles you can apply to directly.</p>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-gray-500">
+                  <span>{selectedJobIds.size} selected</span>
+                  {selectedJobIds.size > 0 && (
+                    <button onClick={handleClearSelectedJobs} className="text-gray-500 hover:text-gray-700 underline">Clear</button>
+                  )}
+                </div>
               </div>
-              <input
-                type="text"
-                value={jobSearch}
-                onChange={(e) => setJobSearch(e.target.value)}
-                placeholder="Search by title or department…"
-                className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 w-64"
-              />
+
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-4 space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <input type="text" value={jobSearch} onChange={(e) => setJobSearch(e.target.value)} placeholder="Search title, department, location" className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <select value={departmentFilter} onChange={(e) => setDepartmentFilter(e.target.value)} className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-500">
+                    <option value="">All departments</option>
+                    {departmentOptions.map((department) => <option key={department} value={department}>{department}</option>)}
+                  </select>
+                  <select value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)} className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-500">
+                    <option value="">All locations</option>
+                    {locationOptions.map((location) => <option key={location} value={location}>{location}</option>)}
+                  </select>
+                  <input type="number" min="0" max="100" value={minMatchScore} onChange={(e) => setMinMatchScore(e.target.value)} placeholder="Minimum match score" className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </div>
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <p className="text-xs text-gray-500">Showing {filteredJds.length} of {jdPool.length} open roles. {selectedFilteredJobIds.length} filtered roles selected.</p>
+                  <div className="flex items-center gap-2">
+                    <button onClick={handleSelectAllFilteredJobs} disabled={filteredJds.length === 0} className="border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-gray-700 font-medium px-3 py-2 rounded-lg text-sm transition-colors">Select All Filtered Jobs</button>
+                    <button onClick={handleCalculateJobMatches} disabled={matchingJobs || selectedJobIds.size === 0 || !candidate} className="bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors flex items-center gap-2">
+                      {matchingJobs && <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" /></svg>}
+                      {matchingJobs ? 'Calculating...' : 'Calculate Match Score'}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {!candidate && (
-              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-700 flex items-center gap-2">
-                ⚠{' '}
-                <span>
-                  Upload your resume in{' '}
-                  <button onClick={() => setActiveTab('profile')} className="underline font-medium">My Profile</button>
-                  {' '}before applying.
-                </span>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-700">
+                Upload your resume in <button onClick={() => setActiveTab('profile')} className="underline font-medium">My Profile</button> before applying or calculating match scores.
               </div>
             )}
 
+            {jobMatchError && <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">{jobMatchError}</div>}
+
             {loadingPool ? (
-              <LoadingSpinner label="Loading open roles…" />
+              <LoadingSpinner label="Loading open roles..." />
             ) : filteredJds.length === 0 ? (
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-12 text-center">
-                <p className="text-4xl mb-3">🌐</p>
-                <p className="text-gray-500 text-sm">
-                  {jdPool.length === 0 ? 'No open roles right now. Check back soon!' : 'No roles match your search.'}
-                </p>
-              </div>
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center"><p className="text-gray-500 text-sm">{jdPool.length === 0 ? 'No open roles right now. Check back soon!' : 'No roles match your filters.'}</p></div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {filteredJds.map((jd) => {
                   const alreadyApplied = appliedJdIds.has(jd.id)
                   const myApp = myApplications.find((a) => a.jd_id === jd.id)
+                  const match = jobMatchResults[jd.id]
+                  const selected = selectedJobIds.has(jd.id)
+                  const displayScore = match?.total_score ?? myApp?.match_score ?? null
+                  const matchedSkills = match?.matched_skills || match?.score_json?.hard_skills_match?.matched || []
+                  const missingSkills = match?.missing_skills || match?.score_json?.hard_skills_match?.gaps || []
                   return (
-                    <div key={jd.id} className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 flex flex-col gap-3">
-                      <div>
-                        <p className="text-base font-semibold text-gray-900">{jd.title}</p>
-                        {jd.company_name && (
-                          <p className="text-sm text-gray-500 mt-0.5">{jd.company_name}</p>
-                        )}
-                        <div className="flex items-center gap-2 mt-1 text-xs text-gray-400 flex-wrap">
-                          {jd.department && <span>{jd.department}</span>}
-                          {jd.department && jd.location && <span>·</span>}
-                          {jd.location && <span>{jd.location}</span>}
+                    <div key={jd.id} className={`bg-white rounded-xl border shadow-sm p-5 flex flex-col gap-3 ${selected ? 'border-teal-300 ring-1 ring-teal-100' : 'border-gray-200'}`}>
+                      <div className="flex items-start gap-3">
+                        <input type="checkbox" checked={selected} onChange={() => handleToggleJobSelection(jd.id)} className="mt-1 h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500" aria-label={`Select ${jd.title}`} />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-base font-semibold text-gray-900">{jd.title}</p>
+                          {jd.company_name && <p className="text-sm text-gray-500 mt-0.5">{jd.company_name}</p>}
+                          <div className="flex items-center gap-2 mt-1 text-xs text-gray-400 flex-wrap">{jd.department && <span>{jd.department}</span>}{jd.department && jd.location && <span>-</span>}{jd.location && <span>{jd.location}</span>}</div>
                         </div>
                       </div>
+
+                      {match && (
+                        <div className="bg-teal-50 border border-teal-100 rounded-lg p-3 space-y-2">
+                          <div className="flex items-center justify-between gap-3"><p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Resume match</p><span className="text-lg font-bold text-teal-700">{Math.round(match.total_score)}%</span></div>
+                          {match.overall_summary && <p className="text-sm text-gray-700">{match.overall_summary}</p>}
+                          {matchedSkills.length > 0 && <div><p className="text-xs font-semibold text-gray-500 mb-1">Matched skills</p><div className="flex flex-wrap gap-1.5">{matchedSkills.slice(0, 6).map((skill) => <span key={skill} className="text-xs bg-white text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full">{skill}</span>)}</div></div>}
+                          {missingSkills.length > 0 && <div><p className="text-xs font-semibold text-gray-500 mb-1">Missing skills / gaps</p><div className="flex flex-wrap gap-1.5">{missingSkills.slice(0, 6).map((skill) => <span key={skill} className="text-xs bg-white text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full">{skill}</span>)}</div></div>}
+                        </div>
+                      )}
+
                       <div className="flex items-center justify-between mt-auto pt-1">
-                        {alreadyApplied && myApp?.match_score != null ? (
-                          <span className="text-xs bg-teal-50 text-teal-700 border border-teal-200 px-2.5 py-1 rounded-full font-semibold">
-                            Match: {Math.round(myApp.match_score)}%
-                          </span>
-                        ) : alreadyApplied ? (
-                          <span className="text-xs bg-gray-100 text-gray-500 px-2.5 py-1 rounded-full font-medium">
-                            Applied
-                          </span>
-                        ) : (
-                          <span className="text-xs text-gray-400">Apply to see match score</span>
-                        )}
-                        <button
-                          onClick={() => { setApplyModal(jd); setApplyResult(null); setCoverNote(''); setApplyResumeFile(null); setApplyResumeText(''); setApplyResumeName('') }}
-                          className={`text-sm font-semibold px-4 py-1.5 rounded-lg transition-colors ${
-                            alreadyApplied
-                              ? 'border border-gray-300 text-gray-500 hover:bg-gray-50'
-                              : 'bg-teal-600 hover:bg-teal-700 text-white'
-                          }`}
-                        >
-                          {alreadyApplied ? 'Applied ✓' : 'Apply'}
-                        </button>
+                        {displayScore != null ? <span className="text-xs bg-teal-50 text-teal-700 border border-teal-200 px-2.5 py-1 rounded-full font-semibold">Match: {Math.round(displayScore)}%</span> : alreadyApplied ? <span className="text-xs bg-gray-100 text-gray-500 px-2.5 py-1 rounded-full font-medium">Applied</span> : <span className="text-xs text-gray-400">Select to calculate match</span>}
+                        <button onClick={() => { setApplyModal(jd); setApplyResult(null); setCoverNote(''); setApplyResumeFile(null); setApplyResumeText(''); setApplyResumeName('') }} className={`text-sm font-semibold px-4 py-1.5 rounded-lg transition-colors ${alreadyApplied ? 'border border-gray-300 text-gray-500 hover:bg-gray-50' : 'bg-teal-600 hover:bg-teal-700 text-white'}`}>{alreadyApplied ? 'Applied' : 'Apply'}</button>
                       </div>
                     </div>
                   )
@@ -763,8 +853,6 @@ export default function CandidateDashboard() {
             )}
           </div>
         )}
-
-        {/* ══ MY APPLICATIONS ══ */}
         {activeTab === 'applications' && (
           <div className="max-w-3xl mx-auto px-6 py-10 space-y-6">
             <div className="flex items-center justify-between">
