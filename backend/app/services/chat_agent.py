@@ -683,25 +683,71 @@ async def run_chat_agent(
         print(f">>> JD paste detected ({jd_keyword_hits} keywords, {word_count_jd} words) — calling create_jd directly, bypassing Claude")
 
         # Extract title from message — no Claude needed
+        import re as _re
+
         title = ""
         lines = message.split('\n')
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            low = stripped.lower()
-            if 'job title' in low and ':' in stripped:
-                title = stripped.split(':', 1)[1].strip()
-                break
 
-        # Fallback: first substantial non-instruction line
+        # Method 1: regex patterns — handles both "Job Title: X" and "Job Title X"
+        patterns = [
+            r'job title[:\s]+([^\n\r,\.]{3,80})',      # with colon
+            r'position[:\s]+([^\n\r,\.]{3,80})',
+            r'role[:\s]+([^\n\r,\.]{3,80})',
+            r'job title\s+([A-Z][^\n\r,\.]{2,80})',    # without colon, value starts uppercase
+            r'position\s+([A-Z][^\n\r,\.]{2,80})',
+        ]
+        for pattern in patterns:
+            m = _re.search(pattern, message, _re.IGNORECASE)
+            if m:
+                candidate = m.group(1).strip()
+                # Reject if the value IS exactly a section header (not a job title)
+                for stop in [
+                    'department', 'location', 'job type', 'full-time',
+                    'part-time', 'contract', 'company', 'job summary',
+                    'responsibilities', 'requirements', 'salary',
+                ]:
+                    if candidate.lower() == stop:
+                        candidate = ""
+                        break
+                if candidate and 3 < len(candidate) < 100:
+                    title = candidate
+                    break
+
+        # Method 2: line with "job title" containing the value on the same line
         if not title:
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                low = stripped.lower()
+                if 'job title' in low:
+                    # Try with colon first
+                    if ':' in stripped:
+                        candidate = stripped.split(':', 1)[1].strip()
+                    else:
+                        # Without colon — remove the "job title" label
+                        candidate = _re.sub(r'(?i)job\s+title\s*', '', stripped).strip()
+                    if candidate and 3 < len(candidate) < 100:
+                        title = candidate
+                        break
+
+        # Method 3: first substantial non-label line
+        if not title:
+            stop_words = [
+                ' department', ' location', ' job type', ' full-time',
+                ' part-time', ' we are', ' the candidate', ' job summary',
+                ' responsibilities', ' requirements', ' company',
+                ' salary', ' working hours',
+            ]
             _post_indicators = ["post", "create", "add", "submit", "publish"]
             for line in lines:
                 stripped = line.strip()
                 if not stripped:
                     continue
+                low = ' ' + stripped.lower()
                 if any(p in stripped.lower() for p in _post_indicators) and len(stripped) < 30:
+                    continue
+                if any(sw in low for sw in stop_words):
                     continue
                 if 3 < len(stripped) < 100:
                     title = stripped

@@ -271,6 +271,7 @@ export default function ScreeningPage() {
   const [answerError, setAnswerError] = useState('')
   const [isFollowup, setIsFollowup] = useState(false)
   const [followupQuestion, setFollowupQuestion] = useState('')
+  const [flagMessage, setFlagMessage] = useState(null)
 
   // Complete state
   const [finalScore, setFinalScore] = useState(null)
@@ -482,23 +483,30 @@ export default function ScreeningPage() {
       setRecordingDuration(0)
       speechMetricsRef.current = null // reset for next question
 
-      if (r.data.is_complete) {
-        setFinalScore(r.data.final_score)
-        setFinalGrade(r.data.final_grade)
-        setHeadline(r.data.headline)
-        // Persist email so CandidateDashboard can restore history after logout
-        if (candidateEmail) {
-          localStorage.setItem('recruitai_candidate_email', candidateEmail.toLowerCase().trim())
-        }
-        setView('complete')
-      } else if (r.data.needs_followup) {
-        setFollowupQuestion(r.data.follow_up_question)
-        setIsFollowup(true)
+      // Show flag message if answer was blocked by guardrail
+      if (r.data.flagged && r.data.flag_message) {
+        setFlagMessage(r.data.flag_message)
+        // Keep current question — candidate must re-answer
       } else {
-        setCurrentQuestion(r.data.next_question)
-        setCurrentIndex(r.data.current_index)
-        setIsFollowup(false)
-        setFollowupQuestion('')
+        setFlagMessage(null)
+        if (r.data.is_complete) {
+          setFinalScore(r.data.final_score)
+          setFinalGrade(r.data.final_grade)
+          setHeadline(r.data.headline)
+          // Persist email so CandidateDashboard can restore history after logout
+          if (candidateEmail) {
+            localStorage.setItem('recruitai_candidate_email', candidateEmail.toLowerCase().trim())
+          }
+          setView('complete')
+        } else if (r.data.needs_followup) {
+          setFollowupQuestion(r.data.follow_up_question)
+          setIsFollowup(true)
+        } else {
+          setCurrentQuestion(r.data.next_question)
+          setCurrentIndex(r.data.current_index)
+          setIsFollowup(false)
+          setFollowupQuestion('')
+        }
       }
     } catch (e) {
       setAnswerError(
@@ -702,6 +710,16 @@ export default function ScreeningPage() {
               </div>
             </div>
 
+            {/* Flag message — shown when answer was blocked by guardrail */}
+            {flagMessage && (
+              <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <span>⚠️</span>
+                  <p className="text-sm text-red-700 font-medium">{flagMessage}</p>
+                </div>
+              </div>
+            )}
+
             {/* Question block */}
             <div className="space-y-4">
               {isFollowup ? (
@@ -735,7 +753,7 @@ export default function ScreeningPage() {
               <div className="space-y-4">
                 <div className="flex flex-col items-center gap-3 py-2">
                   <button
-                    onClick={isRecording ? stopRecording : startRecording}
+                    onClick={isRecording ? stopRecording : () => { setFlagMessage(null); startRecording() }}
                     className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-200 shadow-lg ${
                       isRecording
                         ? 'bg-red-500 hover:bg-red-600 ring-4 ring-red-200 animate-pulse'

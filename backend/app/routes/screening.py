@@ -665,8 +665,10 @@ async def submit_answer(req: ScreeningAnswerRequest):
             "current_index": current_idx,
             "total_questions": len(questions),
             "is_complete": False,
+            "is_followup": req.is_followup,   # preserve follow-up state
             "flagged": True,
             "flag_message": safety["candidate_message"],
+            "violation_type": safety["violation"],
         }
 
     # ── Count follow-ups for session context ────────────────────────────
