@@ -1,7 +1,7 @@
-"""
-Phase 5 — Hiring Manager routes with Supabase Auth + RLS.
+﻿"""
+Phase 5 â€” Hiring Manager routes with Supabase Auth + RLS.
 All routes use get_authed_client so RLS filters to the recruiter's own data.
-Zero new AI calls — no credit cost.
+Zero new AI calls â€” no credit cost.
 """
 from datetime import datetime, timedelta, timezone
 import secrets
@@ -119,7 +119,7 @@ async def get_dashboard_summary(
         return empty_summary
 
 
-# ── JD management ─────────────────────────────────────────────────────────
+# â”€â”€ JD management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/create-jd")
 async def create_jd(
@@ -160,7 +160,7 @@ async def get_jd_posts(
     if status == "archived":
         query = query.eq("status", "archived")
     elif status != "all":
-        # Accept "active" and null status — exclude only archived
+        # Accept "active" and null status â€” exclude only archived
         query = query.not_.eq("status", "archived")
     jds_resp = query.order("created_at", desc=True).execute()
     jds = jds_resp.data or []
@@ -266,7 +266,7 @@ async def archive_jd(
     client=Depends(get_authed_client),
     recruiter_id: str = Depends(get_current_user_id),
 ):
-    """Soft-delete — sets status = 'archived'. Never hard-deletes."""
+    """Soft-delete â€” sets status = 'archived'. Never hard-deletes."""
     result = (
         client.table("jd_posts")
         .update({"status": "archived"})
@@ -285,7 +285,7 @@ async def duplicate_jd(
     client=Depends(get_authed_client),
     recruiter_id: str = Depends(get_current_user_id),
 ):
-    """Creates a copy of a JD with 'Copy of …' title prefix, no screening link."""
+    """Creates a copy of a JD with 'Copy of â€¦' title prefix, no screening link."""
     original = (
         client.table("jd_posts")
         .select("*")
@@ -315,7 +315,7 @@ async def duplicate_jd(
     return {"success": True, "data": copy.data[0], "message": "Job description duplicated"}
 
 
-# ── Parse JD ──────────────────────────────────────────────────────────────
+# â”€â”€ Parse JD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/parse-jd")
 async def parse_jd_endpoint(
@@ -346,7 +346,7 @@ async def parse_jd_endpoint(
     return {"jd_id": body.jd_id, "parsed_jd": parsed}
 
 
-# ── Candidate matching ────────────────────────────────────────────────────
+# â”€â”€ Candidate matching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/match-candidates")
 async def match_candidates(
@@ -387,7 +387,7 @@ async def match_candidates(
     ranked = await rank_candidates(candidates_resp.data, jd_text, parsed_jd, body.weights, jd_id=body.jd_id, force_refresh=body.force_refresh)
 
     for candidate in ranked:
-        # Only cache a real score that has all insight fields — never persist a stale/failed result
+        # Only cache a real score that has all insight fields â€” never persist a stale/failed result
         _summary = candidate["score_json"].get("overall_summary", "")
         if (
             candidate["total_score"] > 0
@@ -403,7 +403,7 @@ async def match_candidates(
                 "total_score": candidate["total_score"],
             }).execute()
 
-    # Weights that were actually applied — sent to frontend for display
+    # Weights that were actually applied â€” sent to frontend for display
     weights_used = body.weights if body.weights else get_dynamic_weights(parsed_jd)
 
     results = [
@@ -572,3 +572,39 @@ async def get_match_results(
         for row in response.data
     ]
     return {"success": True, "data": {"results": results}, "message": "Match results retrieved"}
+
+
+@router.get("/bias-check/{jd_id}")
+async def get_bias_check(
+    jd_id: str,
+    client=Depends(get_authed_client),
+    recruiter_id: str = Depends(get_current_user_id),
+):
+    jd_resp = (
+        supabase.table("jd_posts")
+        .select("id, bias_check_json")
+        .eq("id", jd_id)
+        .eq("recruiter_id", recruiter_id)
+        .limit(1)
+        .execute()
+    )
+    if not jd_resp.data:
+        raise HTTPException(status_code=404, detail="Job description not found or not owned by you")
+
+    bias_check = jd_resp.data[0].get("bias_check_json")
+    if not bias_check:
+        return {
+            "success": True,
+            "jd_id": jd_id,
+            "available": False,
+            "bias_detected": False,
+            "message": "No bias analysis available yet.",
+        }
+
+    return {
+        "success": True,
+        "jd_id": jd_id,
+        "available": True,
+        **bias_check,
+    }
+

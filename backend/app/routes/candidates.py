@@ -584,7 +584,7 @@ async def get_my_applications(
     """Candidate sees all their applications and current statuses."""
     candidate = (
         supabase.table("candidates")
-        .select("id")
+        .select("id, email")
         .eq("profile_id", profile_id)
         .limit(1)
         .execute()
@@ -592,14 +592,71 @@ async def get_my_applications(
     if not candidate.data:
         return {"applications": []}
 
+    candidate_row = candidate.data[0]
+    candidate_id = candidate_row["id"]
+    candidate_email = (candidate_row.get("email") or "").lower().strip()
+
     result = (
         supabase.table("jd_applications")
         .select("*, jd_posts(title, department, location)")
-        .eq("candidate_id", candidate.data[0]["id"])
+        .eq("candidate_id", candidate_id)
         .order("applied_at", desc=True)
         .execute()
     )
-    return {"applications": result.data or []}
+    applications = result.data or []
+
+    jd_ids = [app["jd_id"] for app in applications if app.get("jd_id")]
+    completed_by_jd = {}
+    if candidate_email and jd_ids:
+        completed_sessions = (
+            supabase.table("screening_sessions")
+            .select("id, candidate_email, jd_id, status, created_at")
+            .eq("candidate_email", candidate_email)
+            .in_("jd_id", jd_ids)
+            .eq("status", "completed")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        for session in completed_sessions.data or []:
+            jd_id = session.get("jd_id")
+            if jd_id and jd_id not in completed_by_jd:
+                completed_by_jd[jd_id] = session
+
+    completed_session_ids = [session["id"] for session in completed_by_jd.values() if session.get("id")]
+    feedback_session_ids = set()
+    if completed_session_ids:
+        feedback_rows = (
+            supabase.table("candidate_feedback")
+            .select("session_id")
+            .in_("session_id", completed_session_ids)
+            .execute()
+        )
+        feedback_session_ids = {
+            row["session_id"]
+            for row in (feedback_rows.data or [])
+            if row.get("session_id")
+        }
+
+    status_labels = {
+        "applied": "Applied",
+        "shortlisted": "Shortlisted",
+        "invited": "Invited to screen",
+        "rejected": "Not selected",
+    }
+    for app in applications:
+        completed_session = completed_by_jd.get(app.get("jd_id"))
+        if completed_session:
+            app["screening_completed"] = True
+            app["completed_at"] = completed_session.get("created_at")
+            app["display_status"] = "Completed screening"
+            app["feedback_available"] = completed_session.get("id") in feedback_session_ids
+        else:
+            app["screening_completed"] = False
+            app["completed_at"] = None
+            app["display_status"] = status_labels.get(app.get("status"), app.get("status"))
+            app["feedback_available"] = False
+
+    return {"applications": applications}
 
 
 @router.get("/my-invites")
@@ -619,11 +676,17 @@ async def get_my_invites(
     reading the caller's own profile even when no service-role key is set.
     """
     # ── Resolve email via authed PostgREST client (JWT → RLS allows own profile) ─
-    profile_row = client.table("profiles") \
-        .select("email") \
-        .eq("id", profile_id) \
-        .single() \
-        .execute()
+    try:
+        profile_row = client.table("profiles") \
+            .select("email") \
+            .eq("id", profile_id) \
+            .single() \
+            .execute()
+    except Exception as exc:
+        error_text = str(exc).lower()
+        if "jwt" in error_text or "token" in error_text or "expired" in error_text or "unauthorized" in error_text:
+            raise HTTPException(status_code=401, detail="Session expired. Please login again.")
+        raise
     user_email = ((profile_row.data or {}).get("email") or "").lower().strip()
 
     print(f"DEBUG [my-invites] profile_id={profile_id!r}  user_email={user_email!r}")
@@ -691,6 +754,33 @@ async def get_my_invites(
 
     if not invites:
         return {"invites": [], "candidate_id": candidate_id}
+
+    # Reconcile stale invite rows with completed screening sessions.
+    invite_ids = [inv["id"] for inv in invites if inv.get("id")]
+    completed_by_invite = {}
+    if invite_ids:
+        completed_sessions = (
+            supabase.table("screening_sessions")
+            .select("id, invite_id, status, created_at")
+            .in_("invite_id", invite_ids)
+            .eq("status", "completed")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        for session in completed_sessions.data or []:
+            invite_id = session.get("invite_id")
+            if invite_id and invite_id not in completed_by_invite:
+                completed_by_invite[invite_id] = session
+
+    for inv in invites:
+        completed_session = completed_by_invite.get(inv.get("id"))
+        if completed_session:
+            inv["status"] = "completed"
+            inv["screening_completed"] = True
+            inv["completed_at"] = inv.get("completed_at") or completed_session.get("created_at")
+            inv["completed_session_id"] = completed_session.get("id")
+        else:
+            inv["screening_completed"] = inv.get("status") == "completed"
 
     # ── Enrich with JD + company data (separate lookup — jd_posts→profiles FK may not exist) ──
     jd_ids = list({inv["jd_id"] for inv in invites if inv.get("jd_id")})

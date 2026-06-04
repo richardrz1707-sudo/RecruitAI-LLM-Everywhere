@@ -1251,29 +1251,69 @@ Be encouraging and supportive."""
 
 def execute_get_my_invites(params: dict, candidate_id: str) -> dict:
     try:
+        candidate_resp = (
+            supabase.table("candidates")
+            .select("email")
+            .eq("id", candidate_id)
+            .single()
+            .execute()
+        )
+        candidate_email = ((candidate_resp.data or {}).get("email") or "").lower().strip()
+
         result = (
             supabase.table("screening_invites")
-            .select("id, token, status, invited_at, jd_posts(title, department, location)")
+            .select("id, jd_id, token, status, invited_at, completed_at, jd_posts(title, department, location)")
             .eq("candidate_id", candidate_id)
             .order("invited_at", desc=True)
             .limit(5)
             .execute()
         )
+        invite_rows = result.data or []
+        jd_ids = [inv["jd_id"] for inv in invite_rows if inv.get("jd_id")]
+        completed_by_jd = {}
+
+        if candidate_email and jd_ids:
+            completed_sessions = (
+                supabase.table("screening_sessions")
+                .select("id, candidate_email, jd_id, status, created_at")
+                .eq("candidate_email", candidate_email)
+                .in_("jd_id", jd_ids)
+                .eq("status", "completed")
+                .order("created_at", desc=True)
+                .execute()
+            )
+            for session in completed_sessions.data or []:
+                jd_id = session.get("jd_id")
+                if jd_id and jd_id not in completed_by_jd:
+                    completed_by_jd[jd_id] = session
+
         invites = []
-        for inv in (result.data or []):
+        for inv in invite_rows:
             jd = inv.get("jd_posts") or {}
+            completed_session = completed_by_jd.get(inv.get("jd_id"))
+            screening_completed = bool(completed_session) or inv.get("status") == "completed"
+            display_status = "completed" if screening_completed else inv.get("status", "pending")
             invites.append({
                 "status": inv["status"],
+                "display_status": display_status,
+                "screening_completed": screening_completed,
+                "completed_at": inv.get("completed_at") or (completed_session or {}).get("created_at"),
                 "role": jd.get("title", "Unknown role"),
                 "department": jd.get("department", ""),
                 "token": inv["token"],
                 "invited_at": (inv.get("invited_at") or "")[:10]
             })
-        pending = [i for i in invites if i["status"] == "pending"]
+        pending = [
+            i for i in invites
+            if not i["screening_completed"] and i["status"] in ("pending", "started")
+        ]
         return {"success": True, "total": len(invites), "pending_count": len(pending), "invites": invites}
     except Exception as e:
-        return {"success": False, "error": str(e)}
-
+        print(f"[candidate_agent] Invite status lookup failed: {e}")
+        return {
+            "success": False,
+            "error": "I couldn't load your latest screening status right now. Please try again."
+        }
 
 def execute_get_my_applications(params: dict, candidate_id: str) -> dict:
     try:
@@ -1321,16 +1361,47 @@ def execute_get_my_feedback(params: dict, candidate_id: str) -> dict:
                 "date": (fb.get("created_at") or "")[:10]
             })
         if not feedback_list:
+            candidate_resp = (
+                supabase.table("candidates")
+                .select("email")
+                .eq("id", candidate_id)
+                .single()
+                .execute()
+            )
+            candidate_email = ((candidate_resp.data or {}).get("email") or "").lower().strip()
+            completed_session = None
+            if candidate_email:
+                completed_session = (
+                    supabase.table("screening_sessions")
+                    .select("id, candidate_email, jd_id, status, created_at")
+                    .eq("candidate_email", candidate_email)
+                    .eq("status", "completed")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+            if completed_session and completed_session.data:
+                return {
+                    "success": True,
+                    "total": 0,
+                    "screening_completed": True,
+                    "message": "Your screening is completed, but feedback is not available yet.",
+                    "feedback": []
+                }
             return {
                 "success": True,
                 "total": 0,
+                "screening_completed": False,
                 "message": "No interview feedback yet. Complete a screening interview to receive feedback.",
                 "feedback": []
             }
         return {"success": True, "total": len(feedback_list), "feedback": feedback_list}
     except Exception as e:
-        return {"success": False, "error": str(e)}
-
+        print(f"[candidate_agent] Feedback status lookup failed: {e}")
+        return {
+            "success": False,
+            "error": "I couldn't load your latest screening status right now. Please try again."
+        }
 
 def execute_get_open_jobs(params: dict, candidate_id: str) -> dict:
     try:
@@ -1637,12 +1708,13 @@ def build_candidate_reply(tool_name: str, tool_result: str) -> str:
         pending = data.get("pending_count", 0)
         if not invites:
             return "You have no interview invitations yet. Apply to open roles or wait for a recruiter to invite you."
-        status_icons = {"pending": "⏳", "started": "▶️", "completed": "✅", "expired": "❌"}
+        status_icons = {"pending": "\u23f3", "started": "\u25b6\ufe0f", "completed": "\u2705", "expired": "\u274c"}
         header = f"You have **{pending}** pending invitation(s):" if pending else f"Your {len(invites)} interview(s):"
         lines = [header]
         for inv in invites[:5]:
-            lines.append(f"{status_icons.get(inv['status'], '•')} **{inv['role']}** — {inv['status']}")
-        if pending:
+            status = "completed" if inv.get("screening_completed") else inv.get("display_status") or inv.get("status", "pending")
+            lines.append(f"{status_icons.get(status, '\u2022')} **{inv['role']}** \u2014 {status}")
+        if pending > 0:
             lines.append("\nGo to your Invites tab to start your screening.")
         return "\n".join(lines)
 

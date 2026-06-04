@@ -188,6 +188,9 @@ export default function CandidateDashboard() {
       setInvites(r.data?.invites || [])
     } catch (err) {
       console.error('[CandidateDashboard] Failed to fetch invites:', err)
+      if (err.response?.status === 401) {
+        toast.error(err.response?.data?.detail || 'Session expired. Please login again.')
+      }
       setInvites([])
     } finally {
       setLoadingInvites(false)
@@ -707,12 +710,14 @@ export default function CandidateDashboard() {
                 {invites.map((inv) => {
                   const jd = inv.jd_posts || {}
                   const company = inv.company_name || jd.company_name
+                  const inviteCompleted = inv.screening_completed === true || inv.status === 'completed'
+                  const inviteStatus = inviteCompleted ? 'completed' : inv.status
                   return (
                     <div key={inv.id} className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 flex items-start justify-between gap-4">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 mb-1.5">
-                          <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${INVITE_BADGE[inv.status] || 'bg-gray-100 text-gray-500'}`}>
-                            {inv.status.charAt(0).toUpperCase() + inv.status.slice(1)}
+                          <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${INVITE_BADGE[inviteStatus] || 'bg-gray-100 text-gray-500'}`}>
+                            {inviteStatus.charAt(0).toUpperCase() + inviteStatus.slice(1)}
                           </span>
                         </div>
                         <p className="text-base font-semibold text-gray-900 truncate">{jd.title || '—'}</p>
@@ -726,7 +731,7 @@ export default function CandidateDashboard() {
                         </div>
                       </div>
                       <div className="flex-shrink-0">
-                        {inv.status === 'pending' && (
+                        {inviteStatus === 'pending' && (
                           <button
                             onClick={() => handleStartInvite(inv)}
                             className="bg-teal-600 hover:bg-teal-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap"
@@ -734,7 +739,7 @@ export default function CandidateDashboard() {
                             Start Screening →
                           </button>
                         )}
-                        {inv.status === 'started' && (
+                        {inviteStatus === 'started' && (
                           <button
                             onClick={() => handleStartInvite(inv)}
                             className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap"
@@ -742,10 +747,10 @@ export default function CandidateDashboard() {
                             Continue →
                           </button>
                         )}
-                        {inv.status === 'completed' && (
+                        {inviteStatus === 'completed' && (
                           <span className="text-xs text-teal-600 font-medium">✓ Completed</span>
                         )}
-                        {inv.status === 'expired' && (
+                        {inviteStatus === 'expired' && (
                           <span className="text-xs text-gray-400">Expired</span>
                         )}
                       </div>
@@ -892,6 +897,9 @@ export default function CandidateDashboard() {
                   <tbody className="divide-y divide-gray-100">
                     {myApplications.map((app) => {
                       const jd = app.jd_posts || {}
+                      const statusLabel = app.screening_completed === true
+                        ? 'Completed screening'
+                        : app.display_status || STATUS_LABEL[app.status] || app.status
                       return (
                         <tr key={app.id} className="hover:bg-gray-50 transition-colors">
                           <td className="px-5 py-3">
@@ -917,7 +925,7 @@ export default function CandidateDashboard() {
                           </td>
                           <td className="px-5 py-3">
                             <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${STATUS_BADGE[app.status] || 'bg-gray-100 text-gray-600'}`}>
-                              {STATUS_LABEL[app.status] || app.status}
+                              {statusLabel}
                             </span>
                           </td>
                           <td className="px-5 py-3 text-xs text-gray-400">
