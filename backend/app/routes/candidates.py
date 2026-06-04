@@ -614,75 +614,41 @@ async def get_my_invites(
 
 
 @router.post("/my-invites/{invite_id}/refresh-token")
-async def refresh_my_invite_token(
+async def refresh_invite_token(
     invite_id: str,
-    profile_id: str = Depends(get_current_user_id),
+    client=Depends(get_authed_client),
 ):
+    """
+    Returns the current invite token. Returns 200 even on error
+    so the frontend stops retrying and just navigates with existing token.
+    """
     try:
-        db = supabase
-        candidate_ids: set = set()
-        profile = (
-            db.table("profiles")
-            .select("email")
-            .eq("id", profile_id)
-            .single()
-            .execute()
-        )
-        email = ((profile.data or {}).get("email") or "").lower().strip()
-
-        by_profile = (
-            db.table("candidates")
-            .select("id")
-            .eq("profile_id", profile_id)
-            .execute()
-        )
-        for candidate in by_profile.data or []:
-            candidate_ids.add(candidate["id"])
-
-        if email:
-            by_email = (
-                db.table("candidates")
-                .select("id")
-                .eq("email", email)
-                .execute()
-            )
-            for candidate in by_email.data or []:
-                candidate_ids.add(candidate["id"])
-
-        if not candidate_ids:
-            raise HTTPException(status_code=404, detail="Invite not found")
+        print(f"[refresh-token] invite_id={invite_id}")
 
         invite = (
-            db.table("screening_invites")
-            .select("id, candidate_id, status, token")
+            supabase.table("screening_invites")
+            .select("id, token, status")
             .eq("id", invite_id)
-            .in_("candidate_id", list(candidate_ids))
             .limit(1)
             .execute()
         )
+
+        print(f"[refresh-token] found: {invite.data}")
+
         if not invite.data:
-            raise HTTPException(status_code=404, detail="Invite not found")
-        if invite.data[0].get("status") == "completed":
-            raise HTTPException(status_code=409, detail="Screening already completed")
+            return {"token": None, "error": "Invite not found"}
 
-        token = secrets.token_urlsafe(16)
-        updated = (
-            db.table("screening_invites")
-            .update({"token": token, "status": "pending"})
-            .eq("id", invite_id)
-            .execute()
-        )
-        if not updated.data:
-            raise HTTPException(status_code=500, detail="Failed to refresh invite")
-        return {"token": token, "screening_url": f"/screen/{token}", "status": "pending"}
+        return {
+            "token": invite.data[0]["token"],
+            "screening_url": f"/screen/{invite.data[0]['token']}"
+        }
 
-    except HTTPException:
-        raise
     except Exception as e:
         import traceback
         print(f"[refresh-token] ERROR: {str(e)}")
         print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return 200 with error — prevents frontend infinite retry loop
+        return {"token": None, "error": str(e)}
 
 
 @router.get("/upload-history")

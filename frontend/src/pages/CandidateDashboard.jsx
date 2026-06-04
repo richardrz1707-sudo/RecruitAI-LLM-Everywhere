@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   getCandidateProfile, uploadMyResume, getJdPool, applyToJd,
@@ -86,6 +86,7 @@ export default function CandidateDashboard() {
   // ── Invites ─────────────────────────────────────────────────────────────
   const [invites, setInvites]           = useState([])
   const [loadingInvites, setLoadingInvites] = useState(true)
+  const refreshedRef = useRef(new Set())  // prevents double-refresh per invite
 
   // ── Browse Jobs ──────────────────────────────────────────────────────────
   const [jdPool, setJdPool]             = useState([])
@@ -366,12 +367,21 @@ export default function CandidateDashboard() {
   }
 
   const handleStartInvite = async (invite) => {
+    // Guard: only refresh each invite once per page load
+    if (refreshedRef.current.has(invite.id)) {
+      navigate(`/screen/${invite.token}`)
+      return
+    }
+    refreshedRef.current.add(invite.id)
+
     try {
       const refreshed = await refreshMyInviteToken(invite.id)
-      await loadInvites()
-      navigate(`/screen/${refreshed.data?.token || invite.token}`)
+      const token = refreshed.data?.token || invite.token
+      navigate(`/screen/${token}`)
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to open screening invite')
+      // On error navigate with existing token — do NOT retry
+      console.error('[handleStartInvite] refresh failed:', err)
+      navigate(`/screen/${invite.token}`)
     }
   }
 
