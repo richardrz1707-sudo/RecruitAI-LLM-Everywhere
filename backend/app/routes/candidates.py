@@ -288,7 +288,7 @@ async def get_open_jds(
         supabase.table("jd_posts")
         .select("id, title, department, location, created_at, recruiter_id")
         .eq("visibility", "open")
-        .eq("status", "active")
+        .not_.eq("status", "archived")
         .order("created_at", desc=True)
         .execute()
     )

@@ -81,8 +81,7 @@ export const bulkInvite = (candidateIds, jdId) =>
 export const getBiasCheck = (jdId) =>
   api.get(`/hiring-manager/bias-check/${jdId}`)
 
-export const getHiringPipeline = () =>
-  api.get('/hiring-manager/pipeline')
+
 
 export const getQuestionEffectiveness = (jdId) =>
   api.get(`/hiring-manager/question-effectiveness/${jdId}`)

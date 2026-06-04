@@ -13,7 +13,7 @@ CREDIT SAVING:
 import json
 import anthropic
 from app.config import settings
-from app.database import supabase
+from app.database import supabase, get_svc_client
 
 # Async client — matches llm.py pattern
 _client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -188,15 +188,21 @@ async def execute_create_jd(params: dict, recruiter_id: str) -> dict:
                 "error": "Could not extract job title. Please include a clear job title."
             }
 
-        result = supabase.table("jd_posts").insert({
+        print(f"[create_jd] recruiter_id={recruiter_id}")
+        print(f"[create_jd] title={title}")
+
+        svc = get_svc_client()
+        result = svc.table("jd_posts").insert({
             "title": title,
             "jd_text": jd_text,
             "department": params.get("department", ""),
             "location": params.get("location", ""),
-            "visibility": params.get("visibility", "invite_only"),
+            "visibility": params.get("visibility", "open"),
             "recruiter_id": recruiter_id,
             "status": "active"
         }).execute()
+
+        print(f"[create_jd] result={result.data}")
 
         if not result.data:
             return {"success": False, "error": "Failed to create JD"}
@@ -208,7 +214,7 @@ async def execute_create_jd(params: dict, recruiter_id: str) -> dict:
             from app.services.matching import parse_jd
             parsed = await parse_jd(jd_text)
             if parsed:
-                supabase.table("jd_posts").update({"parsed_json": parsed}).eq("id", jd_id).execute()
+                get_svc_client().table("jd_posts").update({"parsed_json": parsed}).eq("id", jd_id).execute()
         except Exception as parse_error:
             print(f"[chat_agent] JD parse error (non-fatal): {parse_error}")
 
@@ -361,7 +367,7 @@ async def execute_run_matching(params: dict, recruiter_id: str) -> dict:
                     candidate_name=candidate["name"]
                 )
                 total = calculate_weighted_score(scores, parsed_jd=parsed_jd)
-                supabase.table("match_scores").upsert(
+                get_svc_client().table("match_scores").upsert(
                     {"candidate_id": candidate["id"], "jd_id": jd_id, "score_json": scores, "total_score": total},
                     on_conflict="candidate_id,jd_id"
                 ).execute()
@@ -464,7 +470,7 @@ async def execute_send_invite(params: dict, recruiter_id: str) -> dict:
             }
 
         token = secrets.token_urlsafe(16)
-        supabase.table("screening_invites").insert({
+        get_svc_client().table("screening_invites").insert({
             "candidate_id": candidate["id"],
             "jd_id": jd["id"],
             "recruiter_id": recruiter_id,
@@ -1496,7 +1502,7 @@ def execute_bulk_apply(params: dict, candidate_id: str) -> dict:
                     try:
                         import asyncio
                         parsed_jd = asyncio.run(parse_jd(truncate_jd(jd["jd_text"])))
-                        supabase.table("jd_posts").update({"parsed_json": parsed_jd}).eq("id", jd_id).execute()
+                        get_svc_client().table("jd_posts").update({"parsed_json": parsed_jd}).eq("id", jd_id).execute()
                     except Exception:
                         parsed_jd = {}
 
@@ -1510,7 +1516,7 @@ def execute_bulk_apply(params: dict, candidate_id: str) -> dict:
                     ))
                     match_score = calculate_weighted_score(scores, parsed_jd=parsed_jd)
                     match_json = scores
-                    supabase.table("match_scores").upsert(
+                    get_svc_client().table("match_scores").upsert(
                         {"candidate_id": candidate_id, "jd_id": jd_id,
                          "score_json": match_json, "total_score": match_score},
                         on_conflict="candidate_id,jd_id"
@@ -1521,7 +1527,7 @@ def execute_bulk_apply(params: dict, candidate_id: str) -> dict:
 
             # Create application
             try:
-                supabase.table("jd_applications").insert({
+                get_svc_client().table("jd_applications").insert({
                     "candidate_id": candidate_id,
                     "jd_id": jd_id,
                     "resume_text": resume_text,

@@ -155,11 +155,16 @@ async def get_jd_posts(
     status: "active" | "archived" | "all"
     Each JD includes screening_count and active_link_token.
     """
+    print(f"[jd-posts] recruiter_id={recruiter_id} status_filter={status}")
     query = client.table("jd_posts").select("*").eq("recruiter_id", recruiter_id)
-    if status != "all":
-        query = query.eq("status", status)
+    if status == "archived":
+        query = query.eq("status", "archived")
+    elif status != "all":
+        # Accept "active" and null status — exclude only archived
+        query = query.not_.eq("status", "archived")
     jds_resp = query.order("created_at", desc=True).execute()
     jds = jds_resp.data or []
+    print(f"[jd-posts] total found={len(jds)}")
 
     if not jds:
         return {"success": True, "data": {"jd_posts": []}, "message": "No job descriptions found"}

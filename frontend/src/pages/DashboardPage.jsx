@@ -10,7 +10,6 @@ import {
   previewInviteQuestions, saveInviteQuestions, getDashboardSummary,
   bulkDecision,
   getBiasCheck,
-  getHiringPipeline,
   getQuestionEffectiveness,
 } from '../lib/api'
 import { useAuthStore } from '../lib/auth'
@@ -942,82 +941,6 @@ function QuestionEffectivenessPanel({ jdId }) {
   )
 }
 
-function KanbanBoard({ stages, loading }) {
-  const columns = [
-    { key: 'applied', label: 'Applied', tag: 'AP', color: 'bg-gray-50 border-gray-200', headerColor: 'bg-gray-100 text-gray-700' },
-    { key: 'screened', label: 'Screened', tag: 'SC', color: 'bg-blue-50 border-blue-200', headerColor: 'bg-blue-100 text-blue-700' },
-    { key: 'shortlisted', label: 'Shortlisted', tag: 'SL', color: 'bg-amber-50 border-amber-200', headerColor: 'bg-amber-100 text-amber-700' },
-    { key: 'advanced', label: 'Advanced', tag: 'AD', color: 'bg-teal-50 border-teal-200', headerColor: 'bg-teal-100 text-teal-700' },
-    { key: 'rejected', label: 'Not selected', tag: 'NS', color: 'bg-red-50 border-red-200', headerColor: 'bg-red-100 text-red-700' },
-  ]
-
-  if (loading) {
-    return (
-      <div className="flex gap-3 overflow-x-auto pb-4">
-        {columns.map((column) => (
-          <div key={column.key} className="flex-shrink-0 w-60 bg-gray-50 rounded-xl h-72 animate-pulse" />
-        ))}
-      </div>
-    )
-  }
-
-  if (!stages) {
-    return (
-      <div className="text-center py-8 text-gray-400 text-sm">
-        Could not load pipeline
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex gap-3 overflow-x-auto pb-4">
-      {columns.map((column) => {
-        const cards = stages[column.key] || []
-        return (
-          <div key={column.key} className={`flex-shrink-0 w-60 border rounded-xl overflow-hidden ${column.color}`}>
-            <div className={`px-3 py-2 ${column.headerColor} flex items-center justify-between`}>
-              <span className="text-xs font-medium">
-                {column.tag} {column.label}
-              </span>
-              <span className="text-xs bg-white/70 px-1.5 py-0.5 rounded-full font-medium">
-                {cards.length}
-              </span>
-            </div>
-
-            <div className="p-2 space-y-2 max-h-[28rem] overflow-y-auto">
-              {cards.length === 0 ? (
-                <p className="text-xs text-gray-400 text-center py-4">No candidates</p>
-              ) : (
-                cards.map((card) => (
-                  <div key={card.id} className="bg-white rounded-lg p-3 border border-white shadow-sm hover:shadow-md transition-shadow">
-                    <p className="text-xs font-medium text-gray-800 truncate">{card.name}</p>
-                    <p className="text-xs text-gray-400 truncate mb-1.5">{card.jd_title}</p>
-                    {card.score > 0 && (
-                      <div className="flex items-center justify-between">
-                        <span className={`text-xs font-medium ${
-                          card.score >= 80 ? 'text-teal-600' : card.score >= 60 ? 'text-amber-600' : 'text-red-500'
-                        }`}>
-                          {Math.round(card.score)}%
-                        </span>
-                        {card.grade && (
-                          <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
-                            {card.grade}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    <p className="text-xs text-gray-300 mt-1">{card.date}</p>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 export default function DashboardPage() {
   const navigate = useNavigate()
   const { fullName, clearUser } = useAuthStore()
@@ -1028,9 +951,6 @@ export default function DashboardPage() {
   const [selectedJdId, setSelectedJdId]   = useState(null)
   const [showNewJdModal, setShowNewJdModal] = useState(false)
   const [showArchivedJds, setShowArchivedJds] = useState(false)
-  const [pipelineView, setPipelineView] = useState(true)
-  const [pipeline, setPipeline] = useState(null)
-  const [pipelineLoading, setPipelineLoading] = useState(false)
 
   // JD editing
   const [isEditing, setIsEditing]   = useState(false)
@@ -1165,11 +1085,6 @@ export default function DashboardPage() {
     loadApplications(selectedJdId)
   }, [selectedJdId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (!selectedJdId && !pipeline && !pipelineLoading) {
-      loadPipeline()
-    }
-  }, [selectedJdId, pipeline, pipelineLoading]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadJdList = async () => {
     setLoadingJds(true)
@@ -1197,13 +1112,6 @@ export default function DashboardPage() {
       .finally(() => setLoadingResults(false))
   }
 
-  const loadPipeline = () => {
-    setPipelineLoading(true)
-    getHiringPipeline()
-      .then((r) => setPipeline(r.data?.stages || null))
-      .catch(() => setPipeline(null))
-      .finally(() => setPipelineLoading(false))
-  }
 
   // ── JD CRUD ───────────────────────────────────────────────────────────
   const handleJdCreated = async (newJdId) => {
@@ -1916,39 +1824,7 @@ export default function DashboardPage() {
           <InsightsSummaryCard refreshKey={`${activeJds.length}-${screeningResults.length}`} />
         </div>
 
-        {!selectedJd && (
-        <div className="hidden">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setPipelineView(false)}
-              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
-                !pipelineView ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              List view
-            </button>
-            <button
-              onClick={() => {
-                setPipelineView(true)
-                if (!pipeline) loadPipeline()
-              }}
-              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
-                pipelineView ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              Pipeline view
-            </button>
-          </div>
-        </div>
-        )}
-
         {!selectedJd ? (
-          pipelineView ? (
-          <div className="p-6 max-w-7xl mx-auto">
-            <KanbanBoard stages={pipeline} loading={pipelineLoading} />
-          </div>
-        ) : (
-          /* Empty state */
           <div className="flex flex-col items-center justify-center h-full text-center p-8">
             <p className="text-5xl mb-4">🎯</p>
             <h2 className="text-xl font-semibold text-gray-800 mb-2">Select a job description</h2>
@@ -1962,7 +1838,6 @@ export default function DashboardPage() {
               + Create your first JD
             </button>
           </div>
-          )
         ) : (
           <div className="p-6 space-y-6 max-w-5xl mx-auto">
 

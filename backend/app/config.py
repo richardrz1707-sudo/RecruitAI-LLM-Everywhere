@@ -13,7 +13,11 @@ class Settings:
     SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
     # Service role key bypasses RLS — used for server-side public operations.
     # Get it from: Supabase Dashboard → Project Settings → API → service_role key
-    SUPABASE_SERVICE_KEY: str = os.getenv("SUPABASE_SERVICE_KEY", "")
+    # Accept either key name — .env may use SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_ROLE_KEY
+    SUPABASE_SERVICE_KEY: str = (
+        os.getenv("SUPABASE_SERVICE_KEY") or
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    )
 
 
 settings = Settings()
