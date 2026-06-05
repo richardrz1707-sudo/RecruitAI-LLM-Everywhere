@@ -995,6 +995,7 @@ export default function DashboardPage() {
   // Applications (self-applicants per JD)
   const [applications, setApplications]           = useState([])
   const [loadingApplications, setLoadingApplications] = useState(false)
+  const [informedStatusBySessionId, setInformedStatusBySessionId] = useState({})
   // Track which candidate IDs have been invited this session (for instant UI feedback)
   const [invitedCandidateIds, setInvitedCandidateIds] = useState(new Set())
   const [questionPreview, setQuestionPreview] = useState(null)
@@ -1041,14 +1042,15 @@ export default function DashboardPage() {
       .filter(Boolean)
   ), [applications, candidates])
 
-  const applicationByEmail = useMemo(() => {
-    const byEmail = new Map()
+  const applicationByJdEmail = useMemo(() => {
+    const byJdEmail = new Map()
     applications.forEach((app) => {
       const email = (app.candidates?.email || '').toLowerCase().trim()
-      if (email) byEmail.set(email, app)
+      const jdId = app.jd_id || selectedJdId
+      if (email && jdId) byJdEmail.set(`${jdId}:${email}`, app)
     })
-    return byEmail
-  }, [applications])
+    return byJdEmail
+  }, [applications, selectedJdId])
 
   // ── Load JD list + candidates on mount ───────────────────────────────
   useEffect(() => {
@@ -1069,6 +1071,7 @@ export default function DashboardPage() {
       setApplications([])
       setSelectedIds(new Set())
       setSelectedSessions([])
+      setInformedStatusBySessionId({})
       return
     }
     setIsEditing(false)
@@ -1079,6 +1082,7 @@ export default function DashboardPage() {
     setSessionDetail(null)
     setSelectedIds(new Set())
     setSelectedSessions([])
+    setInformedStatusBySessionId({})
 
     getScreeningLink(selectedJdId)
       .then((r) => {
@@ -1299,7 +1303,7 @@ export default function DashboardPage() {
 
   const handleInformCandidateDecision = async (screeningRow, status) => {
     const email = (screeningRow.candidate_email || '').toLowerCase().trim()
-    const app = applicationByEmail.get(email)
+    const app = applicationByJdEmail.get(`${selectedJdId}:${email}`)
 
     if (!app?.id) {
       toast.error('No application record found for this screened candidate')
@@ -1312,13 +1316,15 @@ export default function DashboardPage() {
       setApplications((prev) =>
         prev.map((item) => item.id === app.id ? { ...item, status: savedStatus } : item)
       )
+      setInformedStatusBySessionId((prev) => ({
+        ...prev,
+        [screeningRow.session_id]: savedStatus,
+      }))
       toast.success(
         status === 'advanced'
           ? 'Candidate marked as Advanced to next stage.'
           : 'Candidate marked as Rejected.'
       )
-      loadApplications(selectedJdId)
-      loadScreeningResults(selectedJdId)
     } catch {
       toast.error('Failed to update candidate decision')
     }
@@ -1413,24 +1419,35 @@ export default function DashboardPage() {
       matchResults.find((m) => m.candidate_id === candidateId)?.candidate_name ||
       'Candidate'
 
-  const sendInvite = async (candidateId, jdId, candidateName) => {
+  const sendInvite = async (candidateId, jdId, candidateName, applicationId = null) => {
     // Optimistic update: mark as invited in applications list immediately
     setApplications((prev) =>
       prev.map((a) =>
-        a.candidates?.id === candidateId ? { ...a, status: 'invited' } : a
+        (applicationId ? a.id === applicationId : a.candidates?.id === candidateId && a.jd_id === jdId)
+          ? { ...a, status: 'invited' }
+          : a
       )
     )
     setInvitedCandidateIds((prev) => new Set([...prev, candidateId]))
 
     try {
       await createInvite(candidateId, jdId)
+      if (applicationId) {
+        const response = await updateApplicationStatus(applicationId, 'invited')
+        const savedStatus = response.data?.status || 'invited'
+        setApplications((prev) =>
+          prev.map((a) => a.id === applicationId ? { ...a, status: savedStatus } : a)
+        )
+      }
       toast.success(`Invite sent to ${candidateName}`)
       return true
     } catch (err) {
       // Revert optimistic updates on failure
       setApplications((prev) =>
         prev.map((a) =>
-          a.candidates?.id === candidateId ? { ...a, status: 'applied' } : a
+          (applicationId ? a.id === applicationId : a.candidates?.id === candidateId && a.jd_id === jdId)
+            ? { ...a, status: 'applied' }
+            : a
         )
       )
       setInvitedCandidateIds((prev) => {
@@ -1443,11 +1460,12 @@ export default function DashboardPage() {
     }
   }
 
-  const handleInvite = async (candidateId, jdId) => {
+  const handleInvite = async (candidateId, jdId, applicationId = null) => {
     setLoadingQuestionPreview(true)
     setQuestionPreview({
       candidateId,
       jdId,
+      applicationId,
       candidateName: getCandidateDisplayName(candidateId),
       jdTitle: selectedJd?.title || '',
       questions: [],
@@ -1457,6 +1475,7 @@ export default function DashboardPage() {
       setQuestionPreview({
         candidateId,
         jdId,
+        applicationId,
         candidateName: res.data?.candidate_name || getCandidateDisplayName(candidateId),
         jdTitle: res.data?.jd_title || selectedJd?.title || '',
         questions: res.data?.questions || [],
@@ -1465,7 +1484,7 @@ export default function DashboardPage() {
       setQuestionPreview(null)
       toast.error(err.response?.data?.detail || 'Failed to load interview questions')
       if (window.confirm('Question preview failed. Send the invite without preview?')) {
-        await sendInvite(candidateId, jdId, getCandidateDisplayName(candidateId))
+        await sendInvite(candidateId, jdId, getCandidateDisplayName(candidateId), applicationId)
       }
     } finally {
       setLoadingQuestionPreview(false)
@@ -1483,7 +1502,7 @@ export default function DashboardPage() {
 
   const handleSendPreviewInvite = async () => {
     if (!questionPreview) return
-    const { candidateId, jdId, candidateName } = questionPreview
+    const { candidateId, jdId, candidateName, applicationId } = questionPreview
     const questions = questionPreview.questions || []
     if (questions.length !== 5 || questions.some((q) => !(q.question || '').trim())) {
       toast.error('Please keep all 5 interview questions filled in')
@@ -1493,7 +1512,7 @@ export default function DashboardPage() {
     setSendingPreviewInvite(true)
     try {
       await saveInviteQuestions(candidateId, jdId, questions)
-      const sent = await sendInvite(candidateId, jdId, candidateName)
+      const sent = await sendInvite(candidateId, jdId, candidateName, applicationId)
       if (sent) setQuestionPreview(null)
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Failed to save interview questions')
@@ -2106,7 +2125,6 @@ export default function DashboardPage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-gray-100 text-left text-xs text-gray-400 font-semibold uppercase tracking-wide">
-                        <th className="pb-2 pr-3 w-8"></th>
                         <th className="pb-2 pr-3">Candidate</th>
                         <th className="pb-2 pr-3">Status</th>
                         <th className="pb-2 pr-3">Applied</th>
@@ -2140,9 +2158,10 @@ export default function DashboardPage() {
                                 onChange={async (e) => {
                                   const newStatus = e.target.value
                                   try {
-                                    await updateApplicationStatus(app.id, newStatus)
+                                    const response = await updateApplicationStatus(app.id, newStatus)
+                                    const savedStatus = response.data?.status || newStatus
                                     setApplications((prev) =>
-                                      prev.map((a) => a.id === app.id ? { ...a, status: newStatus } : a)
+                                      prev.map((a) => a.id === app.id ? { ...a, status: savedStatus } : a)
                                     )
                                     toast.success('Status updated')
                                   } catch {
@@ -2152,8 +2171,8 @@ export default function DashboardPage() {
                                 className={`text-xs font-semibold px-2 py-1 rounded-full border-0 cursor-pointer focus:ring-2 focus:ring-teal-500 ${statusColors[app.status] || 'bg-gray-100 text-gray-600'}`}
                               >
                                 <option value="applied">Applied</option>
-                                <option value="shortlisted">Shortlisted</option>
-                                <option value="invited">Invited</option>
+                                <option value="shortlisted">Advanced to next stage</option>
+                                <option value="invited">Invited to screen</option>
                                 <option value="rejected">Rejected</option>
                               </select>
                             </td>
@@ -2181,7 +2200,7 @@ export default function DashboardPage() {
                                 {app.status !== 'invited' && cand.id && (
                                   <>
                                     <span className="text-gray-300">|</span>
-                                    <button onClick={() => handleInvite(cand.id, selectedJdId)}
+                                    <button onClick={() => handleInvite(cand.id, selectedJdId, app.id)}
                                       className="text-xs text-teal-600 hover:text-teal-800 font-semibold underline transition-colors">
                                       Invite
                                     </button>
@@ -2333,6 +2352,7 @@ export default function DashboardPage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-gray-100 text-left text-xs text-gray-400 font-semibold uppercase tracking-wide">
+                        <th className="pb-2 pr-3 w-8"></th>
                         <th className="pb-2 pr-3">Candidate</th>
                         <th className="pb-2 pr-3">Score</th>
                         <th className="pb-2 pr-3">Grade</th>
@@ -2348,8 +2368,9 @@ export default function DashboardPage() {
                         const rec = HIRE_REC[r.hire_recommendation] || HIRE_REC.maybe
                         const gradeStyle = GRADE_STYLES[r.overall_grade] || GRADE_STYLES.F
                         const integrity = INTEGRITY_DOT[r.integrity_risk] || INTEGRITY_DOT.none
-                        const application = applicationByEmail.get((r.candidate_email || '').toLowerCase().trim())
-                        const applicationStatus = application?.status
+                        const email = (r.candidate_email || '').toLowerCase().trim()
+                        const application = applicationByJdEmail.get(`${selectedJdId}:${email}`)
+                        const applicationStatus = informedStatusBySessionId[r.session_id]
                         return (
                           <tr key={r.session_id} className={`hover:bg-gray-50 transition-colors ${selectedSession === r.session_id ? 'bg-teal-50/50' : ''}`}>
                             <td className="py-3 pr-3 align-top">
@@ -2396,43 +2417,45 @@ export default function DashboardPage() {
                                   <button onClick={() => handleQuickDecision(r.session_id, 'hold')} title="Hold" className="w-6 h-6 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-700 flex items-center justify-center text-xs font-bold transition-colors">?</button>
                                 </div>
                               )}
-                              <div className="mt-2 flex flex-col gap-1.5 min-w-[150px]">
-                                {applicationStatus === 'shortlisted' || applicationStatus === 'rejected' ? (
-                                  <span className={`text-xs font-semibold ${applicationStatus === 'shortlisted' ? 'text-blue-700' : 'text-red-600'}`}>
-                                    Candidate informed: {applicationStatus === 'shortlisted' ? 'Advanced' : 'Rejected'}
-                                  </span>
-                                ) : null}
-                                <button
-                                  onClick={() => handleInformCandidateDecision(r, 'advanced')}
-                                  disabled={!application?.id}
-                                  className="text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                >
-                                  Inform as Advanced
-                                </button>
-                                <button
-                                  onClick={() => handleInformCandidateDecision(r, 'rejected')}
-                                  disabled={!application?.id}
-                                  className="text-xs bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-2 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                >
-                                  Inform as Rejected
-                                </button>
-                              </div>
                             </td>
                             <td className="py-3 pr-3">
                               <span className={`inline-block text-xs font-semibold px-2.5 py-1 rounded-full ${rec.color}`}>{rec.label}</span>
                             </td>
                             <td className="py-3 pr-3 text-xs text-gray-400">{new Date(r.created_at).toLocaleDateString()}</td>
-                            <td className="py-3">
-                              <div className="flex items-center gap-2 whitespace-nowrap">
-                                <button onClick={() => handleViewReport(r.session_id)} className="text-xs text-teal-600 hover:text-teal-800 font-semibold underline transition-colors">Full Report</button>
-                                <span className="text-gray-300">|</span>
-                                <button onClick={() => handleViewAnswers(r.session_id)} className="text-xs text-purple-600 hover:text-purple-800 font-semibold underline transition-colors">Review Answers</button>
-                                {r.resume_text && (
-                                  <>
-                                    <span className="text-gray-300">|</span>
-                                    <button onClick={() => openResume(r.candidate_name, r.candidate_email, r.resume_text)} className="text-xs text-blue-600 hover:text-blue-800 font-semibold underline transition-colors">Resume</button>
-                                  </>
-                                )}
+                            <td className="py-3 min-w-[260px]">
+                              <div className="flex flex-col gap-1.5">
+                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 whitespace-nowrap">
+                                  <button onClick={() => handleViewReport(r.session_id)} className="text-xs text-teal-600 hover:text-teal-800 font-semibold underline transition-colors">Full Report</button>
+                                  <span className="text-gray-300">|</span>
+                                  <button onClick={() => handleViewAnswers(r.session_id)} className="text-xs text-purple-600 hover:text-purple-800 font-semibold underline transition-colors">Review Answers</button>
+                                  {r.resume_text && (
+                                    <>
+                                      <span className="text-gray-300">|</span>
+                                      <button onClick={() => openResume(r.candidate_name, r.candidate_email, r.resume_text)} className="text-xs text-blue-600 hover:text-blue-800 font-semibold underline transition-colors">Resume</button>
+                                    </>
+                                  )}
+                                </div>
+                                <div className="flex flex-wrap gap-1.5">
+                                  <button
+                                    onClick={() => handleInformCandidateDecision(r, 'advanced')}
+                                    disabled={!application?.id}
+                                    className="text-[11px] bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                  >
+                                    Inform as Advanced
+                                  </button>
+                                  <button
+                                    onClick={() => handleInformCandidateDecision(r, 'rejected')}
+                                    disabled={!application?.id}
+                                    className="text-[11px] bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-2 py-0.5 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                  >
+                                    Inform as Rejected
+                                  </button>
+                                </div>
+                                {applicationStatus === 'shortlisted' || applicationStatus === 'rejected' ? (
+                                  <span className={`w-fit rounded-full px-2 py-0.5 text-[11px] font-semibold ${applicationStatus === 'shortlisted' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-600'}`}>
+                                    Candidate informed: {applicationStatus === 'shortlisted' ? 'Advanced' : 'Rejected'}
+                                  </span>
+                                ) : null}
                               </div>
                             </td>
                           </tr>

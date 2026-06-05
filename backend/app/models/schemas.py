@@ -190,8 +190,11 @@ class CreateApplicationRequest(BaseModel):
 
 
 class UpdateApplicationStatusRequest(BaseModel):
-    application_id: str
-    status: str
+    application_id: Optional[str] = None
+    candidate_id: Optional[str] = None
+    jd_id: Optional[str] = None
+    status: Optional[str] = None
+    decision: Optional[str] = None
 
 
 # ── Screening invite ──────────────────────────────────────────────────────

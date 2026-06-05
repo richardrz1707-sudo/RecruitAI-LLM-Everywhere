@@ -45,24 +45,31 @@ async def update_application_status(
     """Recruiter shortlists, rejects, or marks candidate as invited."""
     status_map = {
         "advanced": "shortlisted",
+        "advance": "shortlisted",
         "rejected": "rejected",
+        "reject": "rejected",
         "applied": "applied",
         "shortlisted": "shortlisted",
         "invited": "invited",
     }
-    db_status = status_map.get((request.status or "").strip().lower())
+    requested_status = request.status or request.decision
+    db_status = status_map.get((requested_status or "").strip().lower())
     if not db_status:
         raise HTTPException(status_code=400, detail="Invalid application status")
 
-    app = (
-        supabase.table("jd_applications")
-        .select("id, jd_id")
-        .eq("id", request.application_id)
-        .limit(1)
-        .execute()
-    )
+    app_query = supabase.table("jd_applications").select("id, jd_id")
+    if request.application_id:
+        app_query = app_query.eq("id", request.application_id)
+    elif request.candidate_id and request.jd_id:
+        app_query = app_query.eq("candidate_id", request.candidate_id).eq("jd_id", request.jd_id)
+    else:
+        raise HTTPException(status_code=400, detail="application_id or candidate_id + jd_id is required")
+
+    app = app_query.limit(1).execute()
     if not app.data:
         raise HTTPException(status_code=404, detail="Application not found")
+
+    application_id = app.data[0]["id"]
 
     jd = (
         supabase.table("jd_posts")
@@ -78,9 +85,9 @@ async def update_application_status(
     result = (
         supabase.table("jd_applications")
         .update({"status": db_status})
-        .eq("id", request.application_id)
+        .eq("id", application_id)
         .execute()
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Application not found")
-    return {"success": True, "status": db_status}
+    return {"success": True, "application_id": application_id, "status": db_status}
