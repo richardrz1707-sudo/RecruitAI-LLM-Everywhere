@@ -4,7 +4,7 @@ import {
   getCandidateProfile, uploadMyResume, getJdPool, applyToJd,
   getMyApplications, getMyInvites, refreshMyInviteToken, parseResumeOnly, getResumeUploadHistory,
   getPublicJDList, analyseResume, getAnalysisHistory, getSessionsByEmail, matchCandidateJobs,
-  getMyFeedbackHistory, getFeedbackHistoryByEmail,
+  getMyFeedbackHistory, getFeedbackHistoryByEmail, getCandidateJobDetail,
 } from '../lib/api'
 import { useAuthStore } from '../lib/auth'
 import { toast } from '../components/Toast'
@@ -101,6 +101,8 @@ export default function CandidateDashboard() {
   const [matchingJobs, setMatchingJobs] = useState(false)
   const [jobMatchResults, setJobMatchResults] = useState({})
   const [jobMatchError, setJobMatchError] = useState('')
+  const [jobDetail, setJobDetail] = useState(null)
+  const [loadingJobDetail, setLoadingJobDetail] = useState(false)
   const [applyModal, setApplyModal]     = useState(null)   // jd object | null
   const [coverNote, setCoverNote]       = useState('')
   const [applying, setApplying]         = useState(false)
@@ -315,6 +317,19 @@ export default function CandidateDashboard() {
     setApplyResumeName('')
   }
 
+  const openJobDetail = async (job) => {
+    if (!job?.id) return
+    setLoadingJobDetail(true)
+    try {
+      const r = await getCandidateJobDetail(job.id)
+      setJobDetail(r.data?.job || job)
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to load job description')
+    } finally {
+      setLoadingJobDetail(false)
+    }
+  }
+
   const handleApply = async () => {
     if (!applyModal) return
     setApplying(true)
@@ -417,9 +432,14 @@ export default function CandidateDashboard() {
   const filteredJds = useMemo(() => {
     const q = jobSearch.trim().toLowerCase()
     const minScore = Number(minMatchScore) || 0
+    const getDisplayScore = (job) => {
+      const myApp = myApplications.find((a) => a.jd_id === job.id)
+      return jobMatchResults[job.id]?.total_score ?? myApp?.match_score ?? null
+    }
+
     return jdPool.filter((j) => {
       const myApp = myApplications.find((a) => a.jd_id === j.id)
-      const score = jobMatchResults[j.id]?.total_score ?? myApp?.match_score ?? null
+      const score = getDisplayScore(j)
       const matchesSearch = !q ||
         j.title?.toLowerCase().includes(q) ||
         j.department?.toLowerCase().includes(q) ||
@@ -428,6 +448,12 @@ export default function CandidateDashboard() {
       const matchesLocation = !locationFilter || j.location === locationFilter
       const matchesScore = minScore <= 0 || (score != null && Number(score) >= minScore)
       return matchesSearch && matchesDepartment && matchesLocation && matchesScore
+    }).sort((a, b) => {
+      const scoreA = getDisplayScore(a)
+      const scoreB = getDisplayScore(b)
+      const normalisedA = Number.isFinite(Number(scoreA)) ? Number(scoreA) : -1
+      const normalisedB = Number.isFinite(Number(scoreB)) ? Number(scoreB) : -1
+      return normalisedB - normalisedA
     })
   }, [jdPool, jobSearch, departmentFilter, locationFilter, minMatchScore, jobMatchResults, myApplications])
 
@@ -610,6 +636,36 @@ export default function CandidateDashboard() {
       )}
 
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
+      {jobDetail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-gray-100">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">{jobDetail.title || 'Job Description'}</h2>
+                <div className="flex items-center gap-2 mt-1 text-xs text-gray-400 flex-wrap">
+                  {jobDetail.department && <span>{jobDetail.department}</span>}
+                  {jobDetail.department && jobDetail.location && <span>-</span>}
+                  {jobDetail.location && <span>{jobDetail.location}</span>}
+                  {jobDetail.visibility && <span className="text-gray-300">|</span>}
+                  {jobDetail.visibility && <span>{jobDetail.visibility}</span>}
+                  {jobDetail.status && <span className="text-gray-300">|</span>}
+                  {jobDetail.status && <span>{jobDetail.status}</span>}
+                </div>
+              </div>
+              <button
+                onClick={() => setJobDetail(null)}
+                className="text-gray-400 hover:text-gray-600 text-xl leading-none transition-colors"
+              >x</button>
+            </div>
+            <div className="p-6">
+              <pre className="whitespace-pre-wrap font-sans text-sm leading-6 text-gray-700">
+                {jobDetail.jd_text || 'No job description available.'}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
       <aside className="w-64 shrink-0 bg-white border-r border-gray-200 flex flex-col py-6 px-3">
         <div className="mb-6 px-3">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Candidate Portal</p>
@@ -733,6 +789,15 @@ export default function CandidateDashboard() {
                         </div>
                       </div>
                       <div className="flex-shrink-0">
+                        {inv.jd_id && (
+                          <button
+                            onClick={() => openJobDetail({ ...jd, id: inv.jd_id })}
+                            disabled={loadingJobDetail}
+                            className="mb-2 block text-xs text-teal-600 hover:text-teal-700 font-semibold underline disabled:opacity-50"
+                          >
+                            View JD
+                          </button>
+                        )}
                         {inviteStatus === 'pending' && (
                           <button
                             onClick={() => handleStartInvite(inv)}
@@ -849,9 +914,12 @@ export default function CandidateDashboard() {
                         </div>
                       )}
 
-                      <div className="flex items-center justify-between mt-auto pt-1">
+                      <div className="flex items-center justify-between gap-3 mt-auto pt-1">
                         {displayScore != null ? <span className="text-xs bg-teal-50 text-teal-700 border border-teal-200 px-2.5 py-1 rounded-full font-semibold">Match: {Math.round(displayScore)}%</span> : alreadyApplied ? <span className="text-xs bg-gray-100 text-gray-500 px-2.5 py-1 rounded-full font-medium">Applied</span> : <span className="text-xs text-gray-400">Select to calculate match</span>}
-                        <button onClick={() => { setApplyModal(jd); setApplyResult(null); setCoverNote(''); setApplyResumeFile(null); setApplyResumeText(''); setApplyResumeName('') }} className={`text-sm font-semibold px-4 py-1.5 rounded-lg transition-colors ${alreadyApplied ? 'border border-gray-300 text-gray-500 hover:bg-gray-50' : 'bg-teal-600 hover:bg-teal-700 text-white'}`}>{alreadyApplied ? 'Applied' : 'Apply'}</button>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => openJobDetail(jd)} disabled={loadingJobDetail} className="text-sm font-semibold px-3 py-1.5 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors">View JD</button>
+                          <button onClick={() => { setApplyModal(jd); setApplyResult(null); setCoverNote(''); setApplyResumeFile(null); setApplyResumeText(''); setApplyResumeName('') }} className={`text-sm font-semibold px-4 py-1.5 rounded-lg transition-colors ${alreadyApplied ? 'border border-gray-300 text-gray-500 hover:bg-gray-50' : 'bg-teal-600 hover:bg-teal-700 text-white'}`}>{alreadyApplied ? 'Applied' : 'Apply'}</button>
+                        </div>
                       </div>
                     </div>
                   )
@@ -891,6 +959,7 @@ export default function CandidateDashboard() {
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200 text-left text-xs text-gray-400 font-semibold uppercase tracking-wide">
                       <th className="px-5 py-3">Role</th>
+                      <th className="px-5 py-3">JD</th>
                       <th className="px-5 py-3">Match</th>
                       <th className="px-5 py-3">Status</th>
                       <th className="px-5 py-3">Applied</th>
@@ -920,6 +989,19 @@ export default function CandidateDashboard() {
                               {jd.department && jd.location && <span>·</span>}
                               {jd.location && <span>{jd.location}</span>}
                             </div>
+                          </td>
+                          <td className="px-5 py-3">
+                            {app.jd_id ? (
+                              <button
+                                onClick={() => openJobDetail({ ...jd, id: app.jd_id })}
+                                disabled={loadingJobDetail}
+                                className="text-xs text-teal-600 hover:text-teal-700 font-semibold underline disabled:opacity-50"
+                              >
+                                View JD
+                              </button>
+                            ) : (
+                              <span className="text-xs text-gray-400">-</span>
+                            )}
                           </td>
                           <td className="px-5 py-3">
                             {app.match_score != null ? (

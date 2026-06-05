@@ -258,6 +258,9 @@ export const applyToJd = (jdId, coverNote = '', resumeText = '', resumeFilename 
 export const getMyApplications = () =>
   api.get('/candidates/my-applications')
 
+export const getCandidateJobDetail = (jdId) =>
+  api.get(`/candidates/jobs/${jdId}`)
+
 export const getMyInvites = () =>
   api.get('/candidates/my-invites')
 

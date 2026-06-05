@@ -305,6 +305,61 @@ async def get_open_jds(
     return {"jds": jds, "count": len(jds)}
 
 
+@router.get("/jobs/{jd_id}")
+async def get_candidate_job_detail(
+    jd_id: str,
+    profile_id: str = Depends(get_current_user_id),
+):
+    """Candidate-safe JD detail for open jobs, applied jobs, or invited jobs."""
+    jd_resp = (
+        supabase.table("jd_posts")
+        .select("id, title, department, location, jd_text, status, visibility")
+        .eq("id", jd_id)
+        .limit(1)
+        .execute()
+    )
+    if not jd_resp.data:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    jd = jd_resp.data[0]
+    if jd.get("visibility") == "open" and jd.get("status") != "archived":
+        return {"job": jd}
+
+    candidate = (
+        supabase.table("candidates")
+        .select("id")
+        .eq("profile_id", profile_id)
+        .limit(1)
+        .execute()
+    )
+    candidate_id = candidate.data[0]["id"] if candidate.data else None
+    if not candidate_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    application = (
+        supabase.table("jd_applications")
+        .select("id")
+        .eq("candidate_id", candidate_id)
+        .eq("jd_id", jd_id)
+        .limit(1)
+        .execute()
+    )
+    if application.data:
+        return {"job": jd}
+
+    invite = (
+        supabase.table("screening_invites")
+        .select("id")
+        .eq("candidate_id", candidate_id)
+        .eq("jd_id", jd_id)
+        .limit(1)
+        .execute()
+    )
+    if invite.data:
+        return {"job": jd}
+
+    raise HTTPException(status_code=404, detail="Job not found")
+
 
 @router.post("/match-jobs")
 async def match_candidate_jobs(
