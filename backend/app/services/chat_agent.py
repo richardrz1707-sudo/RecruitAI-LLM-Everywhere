@@ -1713,7 +1713,8 @@ def build_candidate_reply(tool_name: str, tool_result: str) -> str:
         lines = [header]
         for inv in invites[:5]:
             status = "completed" if inv.get("screening_completed") else inv.get("display_status") or inv.get("status", "pending")
-            lines.append(f"{status_icons.get(status, '\u2022')} **{inv['role']}** \u2014 {status}")
+            icon = status_icons.get(status, "\u2022")
+            lines.append(f"{icon} **{inv['role']}** \u2014 {status}")
         if pending > 0:
             lines.append("\nGo to your Invites tab to start your screening.")
         return "\n".join(lines)
